@@ -30,30 +30,58 @@ dokumentum többi része hibátlanul elkészül).
 
 **PDF → Word** (`pdf_reader` → `docx_writer`):
 
-A PDF nem tárol bekezdéseket, címsorokat vagy listákat — csak glyphokat
-koordinátákkal. Amit tárol, az a geometria, és a `pdftotext -bbox-layout`
-ezt adja vissza szavanként, kerethatárokkal. Ebből építi újra a beolvasó:
+A PDF nem tárol bekezdéseket, címsorokat, listákat vagy táblázatokat — csak
+glyphokat koordinátákkal. Amit viszont tárol, azt a `pdftohtml -xml`
+(poppler) mind kiadja, és ebből épül újra a dokumentum:
 
-- **Bekezdések**: az egy blokkon belüli sorokat összefűzi, és ott kezd újat,
-  ahol a betűméret változik, az előző sor jóval a hasáb széle előtt ér
-  véget, a sor beljebb kezdődik, vagy szokatlanul nagy a függőleges rés.
-  A sorvégi kötőjelet **megtartja**: a Word és a LibreOffice alapból nem
-  választ el, így ott a kötőjel szinte mindig valódi (egy összetett szó
-  kötőjele, ami véletlenül a sor végére esett) — az eldobása
-  `Word-bekezdés`-ből `Wordbekezdés`-t csinált. Cserébe egy ténylegesen
-  elválasztott PDF-ben (LaTeX, újság) marad egy látható kötőjel a szó
-  közepén.
-- **Címsorok**: a dokumentum leggyakoribb sormagasságához (a kenyérszöveg
-  mérete) viszonyítva; a nagyobb, rövid blokkok lesznek Title / Heading 1-3.
-- **Listák**: a sor elejéről lekerülő `•`/`-`/`1.`/`1)` jelölőből.
+| Megmarad | Honnan |
+| --- | --- |
+| Bekezdések | Az egy blokkon belüli sorokat összefűzi, és ott kezd újat, ahol a betűméret változik, az előző sor jóval a hasáb széle előtt ér véget, a sor beljebb kezdődik, vagy szokatlanul nagy a függőleges rés |
+| Címsorok (Title / Heading 1-3) | A dokumentum leggyakoribb betűméretéhez (a kenyérszöveg mérete) viszonyítva, csak rövid blokkoknál |
+| Felsorolt és számozott listák | A sor elejéről lekerülő `•` / `-` / `1.` / `1)` jelölőből |
+| Félkövér és dőlt szedés | A poppler `<b>` / `<i>` jelöléséből, ami a beágyazott betűtípus nevéből jön |
+| Szövegszín | A `<fontspec color="…">` értékéből |
+| Táblázatok | Egymást követő sorokból, amelyek ugyanarra a néhány oszlophatárra esnek; a csupa félkövér első sor fejlécsor lesz |
+| Képek | A poppler kicsomagolja őket a helyükkel és méretükkel együtt; egy JPEG JPEG marad, nincs újrakódolás |
 
-Amit **nem** lehet visszanyerni: félkövér/dőlt szedés (a kerethatárok nem
-mondják meg), táblázatszerkezet (minden cella külön bekezdésként érkezik),
-képek, színek. Ez nem hiányzó funkció, hanem a formátum korlátja.
+A **sorvégi kötőjelet megtartja**: a Word és a LibreOffice alapból nem
+választ el, így ott a kötőjel szinte mindig valódi (egy összetett szó
+kötőjele, ami véletlenül a sor végére esett) — az eldobása
+`Word-bekezdés`-ből `Wordbekezdés`-t csinált. Cserébe egy ténylegesen
+elválasztott PDF-ben (LaTeX, újság) marad egy látható kötőjel a szó
+közepén.
 
-Ha a PDF-ben **egyáltalán nincs kinyerhető szöveg** (szkennelt / kép alapú
-PDF), a program ezt külön hibaüzenettel jelzi, ahelyett hogy néma, üres
-`.docx`-et adna vissza.
+Amit **nem** lehet visszanyerni: cellaösszevonás és -keret, háttérszín,
+fejléc/lábléc, a pontos elrendezés és betűtípus. A táblázatfelismerés
+szándékosan óvatos: egy kihagyott táblázat sima bekezdésekké esik szét, egy
+tévesen felismert viszont tönkretesz egy egyébként jó szövegrészt — ezért
+csak akkor ismer fel táblázatot, ha a cellák között tényleg van vízszintes
+rés (nem elég, hogy a sor több darabból áll: egy félkövér szó a mondat
+közepén is új darabot kezd).
+
+Egy apróság: a PDF a színt lebegőpontosan tárolja, így egy komponens
+1/255-tel eltérhet oda-vissza átalakítás után. Ez nem hiba, csak
+kerekítés.
+
+### Ha nincs szövegréteg: OCR
+
+Egy szkennelt oldal csupa képpont — nincs mit kinyerni belőle, hacsak nem
+olvassuk vissza a pixeleket. Ilyenkor a program 300 dpi-n kirendereli az
+oldalakat (`pdftoppm`), és `tesseract`-tal ismeri fel a szöveget (magyar +
+angol, amelyik nyelvi adat telepítve van).
+
+A Tesseract **opcionális**: ha nincs telepítve, a hívó ugyanazt az őszinte
+„ebben a PDF-ben nincs szöveg" hibát kapja, mint eddig — sosem egy néma,
+üres `.docx`-et. Ugyanez vonatkozik arra az esetre is, amikor a PDF-ben
+csak kép van: egy `.docx`, amiben egyetlen oldalkép ül, átalakítottnak
+látszik, miközben semmi sem szerkeszthető benne, ezért ez is az OCR-ágra
+megy.
+
+Telepítés (Ubuntu/Debian):
+
+```
+sudo apt install -y tesseract-ocr tesseract-ocr-hun tesseract-ocr-eng
+```
 
 ## Két dolog, amit érdemes tudni a belsőkről
 
@@ -112,7 +140,8 @@ src/
   docx_reader.{h,cpp}   .docx beolvasása (unzip + xml_lite): futamok, listák,
                         táblázatok, beágyazott képek
   docx_writer.{h,cpp}   .docx írása (kézzel épített OOXML csomag + zip)
-  pdf_reader.{h,cpp}    PDF -> dokumentumszerkezet (pdftotext -bbox-layout)
+  pdf_reader.{h,cpp}    PDF -> dokumentumszerkezet (pdftohtml -xml), tablazat-
+                        felismeres, OCR-tartalek (pdftoppm + tesseract)
   pdf_writer.{h,cpp}    PDF írása: tördelés, oldaltörés, táblázatrajzolás,
                         képelhelyezés, kézzel írt PDF szintaxis
   convert.{h,cpp}       a modulokat összekötő magas szintű API
@@ -132,10 +161,12 @@ Függőségek (Ubuntu/Debian):
 ```
 sudo apt install -y build-essential libgtk-3-dev zlib1g-dev poppler-utils \
                     zip unzip fonts-dejavu
+# opcionális, a szkennelt PDF-ek OCR-jéhez:
+sudo apt install -y tesseract-ocr tesseract-ocr-hun tesseract-ocr-eng
 ```
 
-A `poppler-utils` adja a `pdftotext`-et; a `fonts-dejavu` a beágyazandó
-betűkészletet (ha hiányzik, a program `fc-match`-csel keres helyette másik
+A `poppler-utils` adja a `pdftohtml`-t és a `pdftoppm`-et; a `fonts-dejavu` a
+beágyazandó betűkészletet (ha hiányzik, a program `fc-match`-csel keres helyette másik
 TrueType fontot, és csak akkor hibázik, ha egyet sem talál).
 
 ```

@@ -170,10 +170,13 @@ private:
         for (const auto& r : p.runs) {
             if (r.text.empty()) continue;
             out += "<w:r>";
-            if (r.bold || r.italic) {
+            if (r.bold || r.italic || !r.color.empty()) {
                 out += "<w:rPr>";
                 if (r.bold) out += "<w:b/>";
                 if (r.italic) out += "<w:i/>";
+                // Black is the default, so the reader only ever sets this
+                // for a colour that actually differs.
+                if (!r.color.empty()) out += "<w:color w:val=\"" + escapeXml(r.color) + "\"/>";
                 out += "</w:rPr>";
             }
             out += "<w:t xml:space=\"preserve\">" + escapeXml(r.text) + "</w:t></w:r>";

@@ -34,6 +34,17 @@ bool isBlankText(const std::string& s) {
     return std::all_of(s.begin(), s.end(), [](unsigned char c) { return std::isspace(c); });
 }
 
+// w:color carries bare hex, or the literal "auto" meaning "whatever the
+// reader thinks is readable" — which is not a colour we can carry anywhere.
+std::string normaliseColor(const std::string& raw) {
+    std::string hex;
+    for (char c : raw)
+        if (std::isxdigit(static_cast<unsigned char>(c)))
+            hex += static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    if (hex.size() != 6 || hex == "000000") return {};
+    return hex;
+}
+
 ParagraphStyle styleFromId(const std::string& styleId) {
     std::string id = toLower(styleId);
     // Word writes "Heading1"; LibreOffice writes "Heading_20_1". Normalising
@@ -267,20 +278,24 @@ private:
     // Walks a paragraph's children in document order, so runs, hyperlinks and
     // inline pictures keep their relative positions.
     void collectRuns(const xmllite::Node& node, Paragraph& para, std::vector<Block>& pending,
-                     bool inheritedBold, bool inheritedItalic = false) {
+                     bool inheritedBold, bool inheritedItalic = false,
+                     const std::string& inheritedColor = std::string()) {
         for (const auto& c : node.children) {
             if (c.tag == "w:pPr") continue;
             if (c.tag == "w:r") {
                 bool bold = inheritedBold, italic = inheritedItalic;
+                std::string color = inheritedColor;
                 const xmllite::Node* rpr = child(c, "w:rPr");
                 if (rpr) {
                     if (const xmllite::Node* b = child(*rpr, "w:b")) bold = onFlag(*b);
                     if (const xmllite::Node* i = child(*rpr, "w:i")) italic = onFlag(*i);
+                    if (const xmllite::Node* col = child(*rpr, "w:color"))
+                        if (const std::string* v = col->attr("w:val")) color = normaliseColor(*v);
                 }
-                appendRunContent(c, para, pending, bold, italic);
+                appendRunContent(c, para, pending, bold, italic, color);
             } else if (c.tag == "w:hyperlink" || c.tag == "w:smartTag" || c.tag == "w:ins" ||
                        c.tag == "w:sdt" || c.tag == "w:sdtContent" || c.tag == "w:bdo") {
-                collectRuns(c, para, pending, inheritedBold, inheritedItalic);
+                collectRuns(c, para, pending, inheritedBold, inheritedItalic, inheritedColor);
             } else if (c.tag == "w:del") {
                 // Tracked deletions are not part of the document's text.
                 continue;
@@ -289,33 +304,34 @@ private:
     }
 
     void appendRunContent(const xmllite::Node& run, Paragraph& para, std::vector<Block>& pending,
-                          bool bold, bool italic) {
+                          bool bold, bool italic, const std::string& color) {
         for (const auto& c : run.children) {
             if (c.tag == "w:t") {
-                addText(para, c.allText(), bold, italic);
+                addText(para, c.allText(), bold, italic, color);
             } else if (c.tag == "w:tab") {
-                addText(para, "\t", bold, italic);
+                addText(para, "\t", bold, italic, color);
             } else if (c.tag == "w:br" || c.tag == "w:cr") {
-                addText(para, " ", bold, italic);
+                addText(para, " ", bold, italic, color);
             } else if (c.tag == "w:noBreakHyphen") {
-                addText(para, "-", bold, italic);
+                addText(para, "-", bold, italic, color);
             } else if (c.tag == "w:sym") {
                 // A symbol-font character has no Unicode meaning we can
                 // recover reliably; a space keeps the surrounding words apart.
-                addText(para, " ", bold, italic);
+                addText(para, " ", bold, italic, color);
             } else if (c.tag == "w:drawing" || c.tag == "w:pict" || c.tag == "w:object") {
                 readDrawing(c, pending);
             }
         }
     }
 
-    void addText(Paragraph& para, const std::string& text, bool bold, bool italic) {
+    void addText(Paragraph& para, const std::string& text, bool bold, bool italic,
+                 const std::string& color) {
         if (text.empty()) return;
-        if (!para.runs.empty() && para.runs.back().bold == bold &&
-            para.runs.back().italic == italic) {
+        Run candidate{text, bold, italic, color};
+        if (!para.runs.empty() && para.runs.back().sameStyle(candidate)) {
             para.runs.back().text += text;
         } else {
-            para.runs.push_back(Run{text, bold, italic});
+            para.runs.push_back(std::move(candidate));
         }
     }
 

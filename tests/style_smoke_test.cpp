@@ -16,7 +16,7 @@ namespace {
 Paragraph para(const std::string& text, ParagraphStyle style = ParagraphStyle::Normal) {
     Paragraph p;
     p.style = style;
-    p.runs.push_back(Run{text, false, false});
+    p.runs.push_back(Run{text, false, false, {}});
     return p;
 }
 
@@ -47,13 +47,25 @@ int main(int argc, char** argv) {
 
     {
         Paragraph p;
-        p.runs.push_back(Run{"Ez ", false, false});
-        p.runs.push_back(Run{"felkover", true, false});
-        p.runs.push_back(Run{", ez ", false, false});
-        p.runs.push_back(Run{"dolt", false, true});
-        p.runs.push_back(Run{", ez pedig ", false, false});
-        p.runs.push_back(Run{"mindketto", true, true});
-        p.runs.push_back(Run{". Arvizturo tukorfurogep.", false, false});
+        p.runs.push_back(Run{"Ez ", false, false, {}});
+        p.runs.push_back(Run{"felkover", true, false, {}});
+        p.runs.push_back(Run{", ez ", false, false, {}});
+        p.runs.push_back(Run{"dolt", false, true, {}});
+        p.runs.push_back(Run{", ez pedig ", false, false, {}});
+        p.runs.push_back(Run{"mindketto", true, true, {}});
+        p.runs.push_back(Run{". Arvizturo tukorfurogep.", false, false, {}});
+        doc.addParagraph(std::move(p));
+    }
+
+    {
+        Paragraph p;
+        p.runs.push_back(Run{"Szines szoveg: ", false, false, {}});
+        p.runs.push_back(Run{"piros", false, false, "C0392B"});
+        p.runs.push_back(Run{", ", false, false, {}});
+        p.runs.push_back(Run{"kek", false, false, "2980B9"});
+        p.runs.push_back(Run{", ", false, false, {}});
+        p.runs.push_back(Run{"zold felkover", true, false, "27AE60"});
+        p.runs.push_back(Run{".", false, false, {}});
         doc.addParagraph(std::move(p));
     }
 

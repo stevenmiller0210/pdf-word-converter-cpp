@@ -28,6 +28,15 @@ struct Run {
     std::string text; // UTF-8
     bool bold = false;
     bool italic = false;
+    // "RRGGBB", uppercase hex, empty for the default (black). Kept as a
+    // string because that is what OOXML's w:color wants and what a PDF
+    // reader hands back; parsing it into components here would just mean
+    // both writers reassembling it.
+    std::string color;
+
+    bool sameStyle(const Run& other) const {
+        return bold == other.bold && italic == other.italic && color == other.color;
+    }
 };
 
 enum class ListKind {
@@ -113,7 +122,7 @@ struct DocModel {
     void addParagraph(const std::string& text, ParagraphStyle style = ParagraphStyle::Normal) {
         Paragraph p;
         p.style = style;
-        if (!text.empty()) p.runs.push_back(Run{text, false, false});
+        if (!text.empty()) p.runs.push_back(Run{text, false, false, {}});
         addParagraph(std::move(p));
     }
 };

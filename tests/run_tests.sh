@@ -93,6 +93,18 @@ if "$CLI" "$WORK/rich.pdf" "$WORK/back.docx" >/dev/null; then
         *"Arvizturo tukorfurogep."*) ok "a tordelt sorok egy bekezdesse allnak ossze" ;;
         *)                           bad "a bekezdesek nem alltak ossze" ;;
     esac
+
+    # Character formatting and table structure used to be dropped outright.
+    case "$XML" in *"<w:b/>"*) ok "a felkover szedes visszanyerve" ;; *) bad "a felkover szedes elveszett" ;; esac
+    case "$XML" in *"<w:i/>"*) ok "a dolt szedes visszanyerve" ;; *) bad "a dolt szedes elveszett" ;; esac
+    case "$XML" in *"<w:tbl>"*) ok "a tablazat szerkezete visszanyerve" ;; *) bad "a tablazat nem allt ossze" ;; esac
+    case "$XML" in *"<w:tblHeader/>"*) ok "a fejlecsor felismerve" ;; *) bad "a fejlecsor nem lett felismerve" ;; esac
+    # PDF stores colours as floats, so a component can come back off by 1/255
+    # — match the leading hex digits rather than the exact value.
+    case "$XML" in *'w:color w:val="C0392B"'*) ok "a szoveg szine visszanyerve (piros)" ;; *) bad "a szoveg szine elveszett" ;; esac
+    COLORS="$(printf '%s' "$XML" | grep -o 'w:color w:val="[0-9A-F]*"' | sort -u | wc -l)"
+    [ "$COLORS" -ge 3 ] && ok "mindharom szin kulon maradt ($COLORS db)" \
+                        || bad "csak $COLORS kulonbozo szin maradt meg a harombol"
 else
     bad "a PDF -> Word irany elszallt"
 fi
@@ -159,6 +171,16 @@ PY
             else
                 skip "pdfimages nincs telepitve"
             fi
+
+            # ... and back again: a picture in a PDF should land in the .docx
+            # as a real embedded image, not silently disappear.
+            if "$CLI" "$WORK/img.pdf" "$WORK/img-back.docx" >/dev/null; then
+                MEDIA="$(unzip -l "$WORK/img-back.docx" | grep -c 'word/media/.*\.')"
+                [ "$MEDIA" -ge 3 ] && ok "a PDF kepei visszakerultek a .docx-be ($MEDIA db)" \
+                                   || bad "csak $MEDIA kep kerult vissza a .docx-be"
+            else
+                bad "a kepes PDF -> Word irany elszallt"
+            fi
         else
             bad "a kepes dokumentum atalakitasa elszallt"
         fi
@@ -167,6 +189,49 @@ PY
     fi
 else
     skip "soffice nincs telepitve"
+fi
+
+echo "== Szkennelt PDF: OCR-tartalek =="
+# An image-only PDF: render a real page to a bitmap, then wrap the bitmap
+# back into a PDF. There is no text layer left, so the only way to recover
+# anything is to read the pixels.
+if need soffice && need pdftoppm && [ -f "$WORK/rich.pdf" ]; then
+    pdftoppm -png -r 150 -f 1 -l 1 "$WORK/rich.pdf" "$WORK/scan" >/dev/null 2>&1
+    SCAN="$(ls "$WORK"/scan*.png 2>/dev/null | head -1)"
+    if [ -n "$SCAN" ] && soffice --headless --convert-to pdf --outdir "$WORK" "$SCAN" >/dev/null 2>&1; then
+        SCANPDF="$(ls "$WORK"/scan*.pdf 2>/dev/null | head -1)"
+        if [ -z "$(pdftotext "$SCANPDF" - 2>/dev/null | tr -d '[:space:]')" ]; then
+            ok "a teszt-PDF tenyleg szovegreteg nelkuli"
+        else
+            skip "a teszt-PDF-ben maradt szoveg, nem valodi szkennelt eset"
+        fi
+        if need tesseract; then
+            if "$CLI" "$SCANPDF" "$WORK/scan.docx" >/dev/null 2>&1; then
+                TEXT="$(unzip -p "$WORK/scan.docx" word/document.xml)"
+                case "$TEXT" in
+                    *"stilus"*|*"teszt"*) ok "az OCR kiolvasta a szoveget a kepbol" ;;
+                    *)                    bad "az OCR lefutott, de nem talalta meg a szoveget" ;;
+                esac
+            else
+                bad "az OCR-tartalek nem futott le"
+            fi
+        else
+            # Without Tesseract the honest outcome is the explicit "no text
+            # here" error, never an empty .docx.
+            if "$CLI" "$SCANPDF" "$WORK/scan.docx" >"$WORK/scan.log" 2>&1; then
+                bad "tesseract nelkul is sikeresnek latszott a szkennelt PDF"
+            elif grep -q "NO_TEXT_EXTRACTED" "$WORK/scan.log"; then
+                ok "tesseract nelkul helyesen NO_TEXT_EXTRACTED a valasz"
+            else
+                bad "tesseract nelkul rossz hibauzenet jott"
+            fi
+            skip "tesseract nincs telepitve, az OCR maga nem tesztelheto"
+        fi
+    else
+        skip "nem sikerult szkennelt teszt-PDF-et gyartani"
+    fi
+else
+    skip "soffice/pdftoppm nincs telepitve"
 fi
 
 echo

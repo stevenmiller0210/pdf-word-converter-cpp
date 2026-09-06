@@ -165,6 +165,7 @@ struct PlacedText {
     double size = 0;
     FaceStyle face = FaceStyle::Regular;
     std::string text;
+    std::string color;
 };
 
 struct PlacedRule {
@@ -195,6 +196,7 @@ struct Piece {
     double size = 11;
     double dx = 0; // offset from the line's left edge
     std::string text;
+    std::string color; // "RRGGBB", empty for black
 };
 
 struct Line {
@@ -252,6 +254,7 @@ public:
             std::string text;
             double width;
             bool spaceBefore;
+            std::string color;
         };
         std::vector<Token> tokens;
 
@@ -267,7 +270,7 @@ public:
             std::string word;
             auto flush = [&]() {
                 if (word.empty()) return;
-                tokens.push_back({f, word, measure(f, baseSize, word), pendingSpace});
+                tokens.push_back({f, word, measure(f, baseSize, word), pendingSpace, run.color});
                 word.clear();
                 pendingSpace = false;
             };
@@ -312,7 +315,7 @@ public:
                 for (char32_t cp : decodeUtf8(t.text)) {
                     double cw = advanceEm(font, glyphFor(font, cp)) * baseSize;
                     if (chunkW + cw > width && !chunk.empty()) {
-                        cur.push_back({t.face, baseSize, 0, chunk});
+                        cur.push_back({t.face, baseSize, 0, chunk, t.color});
                         endLine();
                         chunk.clear();
                         chunkW = 0;
@@ -321,7 +324,7 @@ public:
                     chunkW += cw;
                 }
                 if (!chunk.empty()) {
-                    cur.push_back({t.face, baseSize, 0, chunk});
+                    cur.push_back({t.face, baseSize, 0, chunk, t.color});
                     curW = chunkW;
                 }
                 continue;
@@ -334,10 +337,10 @@ public:
             std::string text = (lead > 0 ? std::string(" ") : std::string()) + t.text;
             double w = lead + t.width;
 
-            if (!cur.empty() && cur.back().face == t.face) {
+            if (!cur.empty() && cur.back().face == t.face && cur.back().color == t.color) {
                 cur.back().text += text;
             } else {
-                cur.push_back({t.face, baseSize, curW, text});
+                cur.push_back({t.face, baseSize, curW, text, t.color});
             }
             curW += w;
         }
@@ -428,12 +431,13 @@ public:
             t.size = pc.size;
             t.face = pc.face;
             t.text = pc.text;
+            t.color = pc.color;
             pages_.back().texts.push_back(std::move(t));
         }
     }
 
     void putText(const std::string& text, FaceStyle face, double size, double x, double baseline) {
-        pages_.back().texts.push_back({x, baseline, size, face, text});
+        pages_.back().texts.push_back({x, baseline, size, face, text, {}});
     }
 
     void rule(double x1, double y1, double x2, double y2) {
@@ -689,6 +693,22 @@ std::string hex4(unsigned v) {
     return s;
 }
 
+// "RRGGBB" -> the three 0..1 components PDF's `rg` operator wants.
+bool parseHexColor(const std::string& hex, double& r, double& g, double& b) {
+    if (hex.size() != 6) return false;
+    auto comp = [&](size_t off) {
+        return static_cast<double>(std::stoi(hex.substr(off, 2), nullptr, 16)) / 255.0;
+    };
+    try {
+        r = comp(0);
+        g = comp(2);
+        b = comp(4);
+    } catch (...) {
+        return false;
+    }
+    return true;
+}
+
 std::string escapeName(const std::string& s) {
     std::string out;
     for (char c : s) {
@@ -927,8 +947,15 @@ void writePdf(const std::string& path, const DocModel& doc) {
             std::string glyphs;
             for (char32_t cp : decodeUtf8(t.text)) glyphs += hex4(glyphFor(font, cp));
             if (glyphs.empty()) continue;
-            cs << "BT\n/F" << faceIndex(faces.canonical(t.face)) << " " << num(t.size) << " Tf\n"
-               << "1 0 0 1 " << num(t.x) << " " << num(t.y) << " Tm\n<" << glyphs << "> Tj\nET\n";
+            cs << "BT\n/F" << faceIndex(faces.canonical(t.face)) << " " << num(t.size) << " Tf\n";
+            // The fill colour is graphics state, not part of the text
+            // object, so it has to be reset afterwards or every later run
+            // inherits it.
+            double r = 0, g = 0, b = 0;
+            bool colored = parseHexColor(t.color, r, g, b);
+            if (colored) cs << num(r) << " " << num(g) << " " << num(b) << " rg\n";
+            cs << "1 0 0 1 " << num(t.x) << " " << num(t.y) << " Tm\n<" << glyphs << "> Tj\nET\n";
+            if (colored) cs << "0 g\n";
         }
         bodies[contentObjs[i]] = streamObject("", cs.str(), true);
     }
