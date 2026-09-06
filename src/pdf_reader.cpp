@@ -181,12 +181,15 @@ DocModel fromBlocks(const std::vector<SrcBlock>& blocks) {
             double heightSum = 0;
             for (size_t k = i; k < j; ++k) {
                 if (!text.empty()) {
-                    // A hyphen at a line break is almost always a hyphenated
-                    // word being rejoined, not a real hyphen.
-                    if (text.size() > 1 && text.back() == '-')
-                        text.pop_back();
-                    else
-                        text += ' ';
+                    // A line ending in a hyphen is joined without a space,
+                    // but the hyphen is kept. Word processors do not
+                    // auto-hyphenate unless it is switched on, so a hyphen
+                    // there is almost always a real one from a compound word
+                    // that happened to land at the line end — dropping it
+                    // turned "Word-bekezdes" into "Wordbekezdes". The cost is
+                    // that a genuinely hyphenated PDF (LaTeX, newspapers)
+                    // keeps a visible hyphen mid-word.
+                    if (!(text.size() > 1 && text.back() == '-')) text += ' ';
                 }
                 text += block.lines[k].text;
                 heightSum += block.lines[k].height();

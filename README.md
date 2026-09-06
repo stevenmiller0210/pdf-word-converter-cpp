@@ -37,7 +37,12 @@ ezt adja vissza szavanként, kerethatárokkal. Ebből építi újra a beolvasó:
 - **Bekezdések**: az egy blokkon belüli sorokat összefűzi, és ott kezd újat,
   ahol a betűméret változik, az előző sor jóval a hasáb széle előtt ér
   véget, a sor beljebb kezdődik, vagy szokatlanul nagy a függőleges rés.
-  A sorvégi elválasztójelet összevonáskor elhagyja.
+  A sorvégi kötőjelet **megtartja**: a Word és a LibreOffice alapból nem
+  választ el, így ott a kötőjel szinte mindig valódi (egy összetett szó
+  kötőjele, ami véletlenül a sor végére esett) — az eldobása
+  `Word-bekezdés`-ből `Wordbekezdés`-t csinált. Cserébe egy ténylegesen
+  elválasztott PDF-ben (LaTeX, újság) marad egy látható kötőjel a szó
+  közepén.
 - **Címsorok**: a dokumentum leggyakoribb sormagasságához (a kenyérszöveg
   mérete) viszonyítva; a nagyobb, rövid blokkok lesznek Title / Heading 1-3.
 - **Listák**: a sor elejéről lekerülő `•`/`-`/`1.`/`1)` jelölőből.
