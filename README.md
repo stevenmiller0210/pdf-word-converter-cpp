@@ -32,11 +32,6 @@ teljes értékű Word/PDF motor pótléka. Konkrétan:
   hogy garantáltan sose fusson túl az oldalszélen (ehelyett néha egy kicsit
   korábban tör sort a kelleténél).
 
-Ez a lista ugyanazt a "légy őszinte a korlátokról ahelyett, hogy hamis
-hűséget színlelnél" elvet követi, mint a testvérprojekt
-([PistApp](https://github.com/stevenmiller0210/elso_projekt) saját,
-JavaScript-alapú Eszközök → Dokumentum váltó funkciója).
-
 ### Egy érdekesség: magyar ékezetes betűk PDF-ben, beágyazott betűtípus nélkül
 
 A PDF szabvány beépített (nem beágyazott) Helvetica betűtípusának alap
