@@ -124,16 +124,41 @@ public:
         for (const auto& b : doc.blocks) body += block(b);
         if (body.empty()) body = "<w:p/>";
 
+        std::string sectPr = "<w:sectPr>";
+        if (!doc.header.empty())
+            sectPr += "<w:headerReference w:type=\"default\" r:id=\"rIdHdr1\"/>";
+        if (!doc.footer.empty())
+            sectPr += "<w:footerReference w:type=\"default\" r:id=\"rIdFtr1\"/>";
+        sectPr += "<w:pgSz w:w=\"11906\" w:h=\"16838\"/>"
+                  "<w:pgMar w:top=\"1134\" w:right=\"1134\" w:bottom=\"1134\" w:left=\"1134\"/>"
+                  "</w:sectPr>";
+
         return "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n"
                "<w:document "
                "xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" "
                "xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\" "
                "xmlns:wp=\"http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing\">"
                "<w:body>" +
-               body +
-               "<w:sectPr><w:pgSz w:w=\"11906\" w:h=\"16838\"/>"
-               "<w:pgMar w:top=\"1134\" w:right=\"1134\" w:bottom=\"1134\" w:left=\"1134\"/>"
-               "</w:sectPr></w:body></w:document>";
+               body + sectPr + "</w:body></w:document>";
+    }
+
+    // Header/footer parts are their own mini-documents: no <w:body>, no
+    // <w:sectPr>, just a run of paragraphs inside the root element the
+    // schema names after the part.
+    std::string buildRunningPart(const char* rootTag, const std::vector<Paragraph>& paragraphs) {
+        std::string body;
+        for (const auto& p : paragraphs) {
+            Block b;
+            b.kind = Block::Kind::Paragraph;
+            b.paragraph = p;
+            body += block(b);
+        }
+        if (body.empty()) body = "<w:p/>";
+        return "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n"
+               "<w:" + std::string(rootTag) +
+               " xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" "
+               "xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\">" +
+               body + "</w:" + rootTag + ">";
     }
 
     const std::vector<MediaEntry>& media() const { return media_; }
@@ -146,6 +171,16 @@ private:
             case Block::Kind::Image: return b.image ? imageParagraph(*b.image) : std::string();
         }
         return {};
+    }
+
+    static const char* alignmentVal(Alignment a) {
+        switch (a) {
+            case Alignment::Left: return "left";
+            case Alignment::Center: return "center";
+            case Alignment::Right: return "right";
+            case Alignment::Justify: return "both";
+            default: return nullptr;
+        }
     }
 
     std::string paragraph(const Paragraph& p) {
@@ -165,15 +200,25 @@ private:
                      "\"/><w:numId w:val=\"" +
                      (p.list.kind == ListKind::Numbered ? "2" : "1") + "\"/></w:numPr>";
         }
+        if (const char* jc = alignmentVal(p.alignment)) {
+            props += "<w:jc w:val=\"";
+            props += jc;
+            props += "\"/>";
+        }
         if (!props.empty()) out += "<w:pPr>" + props + "</w:pPr>";
 
         for (const auto& r : p.runs) {
             if (r.text.empty()) continue;
             out += "<w:r>";
-            if (r.bold || r.italic || !r.color.empty()) {
+            if (r.bold || r.italic || !r.color.empty() || !r.font.empty()) {
                 out += "<w:rPr>";
                 if (r.bold) out += "<w:b/>";
                 if (r.italic) out += "<w:i/>";
+                if (!r.font.empty()) {
+                    std::string f = escapeXml(r.font);
+                    out += "<w:rFonts w:ascii=\"" + f + "\" w:hAnsi=\"" + f + "\" w:cs=\"" + f +
+                           "\"/>";
+                }
                 // Black is the default, so the reader only ever sets this
                 // for a colour that actually differs.
                 if (!r.color.empty()) out += "<w:color w:val=\"" + escapeXml(r.color) + "\"/>";
@@ -229,6 +274,29 @@ private:
                 out += "<w:tc><w:tcPr><w:tcW w:w=\"" + std::to_string(std::max(1, w)) +
                        "\" w:type=\"dxa\"/>";
                 if (span > 1) out += "<w:gridSpan w:val=\"" + std::to_string(span) + "\"/>";
+                if (cell.rowSpan > 1) out += "<w:vMerge w:val=\"restart\"/>";
+                else if (cell.verticallyMerged) out += "<w:vMerge/>";
+                // The reader only ever sets `borders` away from its
+                // all-true default when a ruled table gave it real border
+                // information; a missing edge there is exactly what a
+                // merged cell is, and drawing one anyway would put a line
+                // back where the source deliberately had none.
+                if (!cell.borders.top || !cell.borders.bottom || !cell.borders.left ||
+                    !cell.borders.right) {
+                    out += "<w:tcBorders>";
+                    auto edge = [&](const char* tag, bool present) {
+                        out += std::string("<w:") + tag + " w:val=\"" +
+                               (present ? "single" : "nil") + "\"" +
+                               (present ? " w:sz=\"4\" w:color=\"999999\"" : "") + "/>";
+                    };
+                    edge("top", cell.borders.top);
+                    edge("left", cell.borders.left);
+                    edge("bottom", cell.borders.bottom);
+                    edge("right", cell.borders.right);
+                    out += "</w:tcBorders>";
+                }
+                if (!cell.shading.empty())
+                    out += "<w:shd w:val=\"clear\" w:fill=\"" + escapeXml(cell.shading) + "\"/>";
                 out += "</w:tcPr>";
 
                 std::string content;
@@ -293,7 +361,7 @@ private:
     std::vector<MediaEntry> media_;
 };
 
-std::string contentTypes(const std::vector<MediaEntry>& media) {
+std::string contentTypes(const std::vector<MediaEntry>& media, bool hasHeader, bool hasFooter) {
     std::string defaults;
     bool png = false, jpeg = false, gif = false, bmp = false, tiff = false;
     for (const auto& m : media) {
@@ -320,7 +388,13 @@ std::string contentTypes(const std::vector<MediaEntry>& media) {
            "<Override PartName=\"/word/styles.xml\" "
            "ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml\"/>"
            "<Override PartName=\"/word/numbering.xml\" "
-           "ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml\"/>"
+           "ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml\"/>" +
+           (hasHeader ? std::string("<Override PartName=\"/word/header1.xml\" "
+                       "ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml\"/>")
+                      : std::string()) +
+           (hasFooter ? std::string("<Override PartName=\"/word/footer1.xml\" "
+                       "ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml\"/>")
+                      : std::string()) +
            "<Override PartName=\"/docProps/core.xml\" "
            "ContentType=\"application/vnd.openxmlformats-package.core-properties+xml\"/>"
            "<Override PartName=\"/docProps/app.xml\" "
@@ -328,7 +402,7 @@ std::string contentTypes(const std::vector<MediaEntry>& media) {
            "</Types>";
 }
 
-std::string documentRels(const std::vector<MediaEntry>& media) {
+std::string documentRels(const std::vector<MediaEntry>& media, bool hasHeader, bool hasFooter) {
     std::string out =
         "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n"
         "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">"
@@ -338,6 +412,14 @@ std::string documentRels(const std::vector<MediaEntry>& media) {
         "<Relationship Id=\"rId2\" "
         "Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering\" "
         "Target=\"numbering.xml\"/>";
+    if (hasHeader)
+        out += "<Relationship Id=\"rIdHdr1\" "
+               "Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/header\" "
+               "Target=\"header1.xml\"/>";
+    if (hasFooter)
+        out += "<Relationship Id=\"rIdFtr1\" "
+               "Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer\" "
+               "Target=\"footer1.xml\"/>";
     for (const auto& m : media) {
         out += "<Relationship Id=\"" + m.relId +
                "\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/"
@@ -427,16 +509,25 @@ void writeDocx(const std::string& path, const DocModel& doc) {
         DocumentBuilder builder;
         std::string documentXml = builder.build(doc);
         const std::vector<MediaEntry>& media = builder.media();
+        bool hasHeader = !doc.header.empty();
+        bool hasFooter = !doc.footer.empty();
 
-        writeFile(root / "[Content_Types].xml", contentTypes(media));
+        writeFile(root / "[Content_Types].xml", contentTypes(media, hasHeader, hasFooter));
         writeFile(root / "_rels" / ".rels", kRootRels);
         writeFile(root / "word" / "document.xml", documentXml);
         writeFile(root / "word" / "styles.xml", kStyles);
         writeFile(root / "word" / "numbering.xml", numberingXml());
-        writeFile(root / "word" / "_rels" / "document.xml.rels", documentRels(media));
+        writeFile(root / "word" / "_rels" / "document.xml.rels",
+                  documentRels(media, hasHeader, hasFooter));
         writeFile(root / "docProps" / "core.xml", kCoreProps);
         writeFile(root / "docProps" / "app.xml", kAppProps);
         for (const auto& m : media) writeFile(root / "word" / "media" / m.fileName, m.bytes);
+        if (hasHeader)
+            writeFile(root / "word" / "header1.xml",
+                      builder.buildRunningPart("hdr", doc.header));
+        if (hasFooter)
+            writeFile(root / "word" / "footer1.xml",
+                      builder.buildRunningPart("ftr", doc.footer));
 
         fs::path absOutput = fs::absolute(path);
         std::error_code ec;

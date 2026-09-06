@@ -191,6 +191,99 @@ else
     skip "soffice nincs telepitve"
 fi
 
+echo "== Osszevont cellak, keret, hatterszin, igazitas, betutipus =="
+# A ruled table drawn with real borders and shading, plus a right-aligned
+# and a left-aligned paragraph sitting right next to each other — the case
+# that used to get merged into one paragraph before alignment was one of
+# the signals continuesParagraph looks at.
+if need soffice; then
+    cat > "$WORK/merged.html" <<'HTML'
+<html><body>
+<h1 style="text-align:center">Kozepre zart cim</h1>
+<p style="text-align:right">Jobbra zart bekezdes.</p>
+<p>Balra zart, normal bekezdes a tablazat elott.</p>
+<table border="1" cellpadding="4" style="border-collapse:collapse">
+<tr style="background-color:#dde5f0">
+  <th colspan="2">Osszevont fejlec</th><th>Harmadik</th>
+</tr>
+<tr>
+  <td rowspan="2">Ket sorra<br>osszevonva</td><td>B1</td><td>C1</td>
+</tr>
+<tr>
+  <td>B2</td><td style="background-color:#f6dede">C2 szines</td>
+</tr>
+</table>
+</body></html>
+HTML
+    if soffice --headless --infilter="HTML (StarWriter)" --convert-to 'docx:MS Word 2007 XML' \
+               --outdir "$WORK" "$WORK/merged.html" >/dev/null 2>&1 && \
+       soffice --headless --convert-to pdf --outdir "$WORK" "$WORK/merged.docx" >/dev/null 2>&1 && \
+       "$CLI" "$WORK/merged.pdf" "$WORK/merged_back.docx" >/dev/null; then
+        XML="$(unzip -p "$WORK/merged_back.docx" word/document.xml)"
+        case "$XML" in *'w:jc w:val="center"'*) ok "kozepre igazitas felismerve" ;; *) bad "kozepre igazitas elveszett" ;; esac
+        case "$XML" in *'w:jc w:val="right"'*) ok "jobbra igazitas felismerve" ;; *) bad "jobbra igazitas elveszett" ;; esac
+        case "$XML" in
+            *"Jobbra zart bekezdes. Balra zart"*) bad "a jobbra es balra zart bekezdes egybeolvadt" ;;
+            *)                                    ok "a jobbra es balra zart bekezdes kulon maradt" ;;
+        esac
+        case "$XML" in *'w:gridSpan w:val="2"'*) ok "az oszlop-osszevonas (colspan) visszanyerve" ;; *) bad "a colspan elveszett" ;; esac
+        case "$XML" in *'w:vMerge w:val="restart"'*) ok "a sor-osszevonas (rowspan) visszanyerve" ;; *) bad "a rowspan elveszett" ;; esac
+        case "$XML" in *'w:fill="DDE5F0"'*) ok "a fejlec hatterszine visszanyerve" ;; *) bad "a fejlec hatterszine elveszett" ;; esac
+        case "$XML" in *'w:fill="F6DEDE"'*) ok "a cella hatterszine visszanyerve" ;; *) bad "a cella hatterszine elveszett" ;; esac
+        case "$XML" in *"Liberation Serif"*) ok "a betutipus neve visszanyerve" ;; *) bad "a betutipus neve elveszett" ;; esac
+
+        if soffice --headless --convert-to pdf --outdir "$WORK" "$WORK/merged_back.docx" >/dev/null 2>&1; then
+            BACKTEXT="$(pdftotext -layout "$WORK/merged_back.pdf" - 2>/dev/null)"
+            case "$BACKTEXT" in
+                *"Ket sorra"*"osszevonva"*) ok "az osszevont cella tartalma vegig eljutott" ;;
+                *)                          bad "az osszevont cella tartalma elveszett a Word -> PDF utban" ;;
+            esac
+        else
+            skip "nem sikerult visszaalakitani PDF-re a Word -> PDF ut ellenorzesehez"
+        fi
+    else
+        skip "nem sikerult osszevont-cellas teszt-PDF-et gyartani"
+    fi
+else
+    skip "soffice nincs telepitve"
+fi
+
+echo "== Fejlec es lablec =="
+if need soffice && need python3; then
+    if python3 "$ROOT/tests/fixtures/make_header_footer_docx.py" "$WORK/hf.docx" >/dev/null && \
+       soffice --headless --convert-to pdf --outdir "$WORK" "$WORK/hf.docx" >/dev/null 2>&1 && \
+       "$CLI" "$WORK/hf.pdf" "$WORK/hf_back.docx" >/dev/null; then
+        PARTS="$(unzip -l "$WORK/hf_back.docx")"
+        case "$PARTS" in *"word/header1.xml"*) ok "a fejlec kulon reszkent visszaallt" ;; *) bad "nem keletkezett fejlec resz" ;; esac
+        case "$PARTS" in *"word/footer1.xml"*) ok "a lablec kulon reszkent visszaallt" ;; *) bad "nem keletkezett lablec resz" ;; esac
+        HDRTEXT="$(unzip -p "$WORK/hf_back.docx" word/header1.xml 2>/dev/null)"
+        case "$HDRTEXT" in *"teszt fejlec"*) ok "a fejlec szovege helyes" ;; *) bad "a fejlec szovege hianyzik vagy rossz" ;; esac
+        FTRTEXT="$(unzip -p "$WORK/hf_back.docx" word/footer1.xml 2>/dev/null)"
+        case "$FTRTEXT" in *"teszt lablec"*) ok "a lablec szovege helyes" ;; *) bad "a lablec szovege hianyzik vagy rossz" ;; esac
+        BODYTEXT="$(unzip -p "$WORK/hf_back.docx" word/document.xml 2>/dev/null)"
+        case "$BODYTEXT" in
+            *"fejlec"*|*"lablec"*) bad "a fejlec/lablec szovege a torzsszovegben is megjelent (nem kulon reszkent kezelve)" ;;
+            *)                     ok "a fejlec/lablec nem szivargott bele a torzsszovegbe" ;;
+        esac
+        if "$CLI" "$WORK/hf_back.docx" "$WORK/hf_back.pdf" >/dev/null 2>&1; then
+            # pdf_writer paginates independently of Word/LibreOffice, so the
+            # page count is whatever it is — the header just has to appear
+            # once per page it actually produced, not a fixed count.
+            PAGES="$(pdfinfo "$WORK/hf_back.pdf" 2>/dev/null | awk '/^Pages:/ {print $2}')"
+            HDRCOUNT="$(pdftotext "$WORK/hf_back.pdf" - 2>/dev/null | grep -c "teszt fejlec")"
+            [ -n "$PAGES" ] && [ "$HDRCOUNT" = "$PAGES" ] \
+                && ok "a fejlec minden oldalon megjelent a Word -> PDF utban ($HDRCOUNT/$PAGES oldal)" \
+                || bad "a fejlec nem jelent meg minden oldalon ($HDRCOUNT/$PAGES oldal)"
+        else
+            skip "nem sikerult visszaalakitani PDF-re a Word -> PDF ut ellenorzesehez"
+        fi
+    else
+        skip "nem sikerult fejleces teszt-fixturat gyartani"
+    fi
+else
+    skip "soffice/python3 nincs telepitve"
+fi
+
 echo "== Szkennelt PDF: OCR-tartalek =="
 # An image-only PDF: render a real page to a bitmap, then wrap the bitmap
 # back into a PDF. There is no text layer left, so the only way to recover

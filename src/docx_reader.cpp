@@ -222,6 +222,7 @@ private:
     void readParagraph(const xmllite::Node& p, std::vector<Block>& out) {
         Paragraph para;
         para.style = paragraphStyle(p);
+        para.alignment = paragraphAlignment(p);
         applyListInfo(p, para);
 
         std::vector<Block> pending;
@@ -244,6 +245,19 @@ private:
         const xmllite::Node* st = child(*ppr, "w:pStyle");
         if (st && st->attr("w:val")) return styleFromId(*st->attr("w:val"));
         return ParagraphStyle::Normal;
+    }
+
+    Alignment paragraphAlignment(const xmllite::Node& p) {
+        const xmllite::Node* ppr = child(p, "w:pPr");
+        if (!ppr) return Alignment::Default;
+        const xmllite::Node* jc = child(*ppr, "w:jc");
+        if (!jc || !jc->attr("w:val")) return Alignment::Default;
+        const std::string& v = *jc->attr("w:val");
+        if (v == "center") return Alignment::Center;
+        if (v == "right" || v == "end") return Alignment::Right;
+        if (v == "both" || v == "distribute") return Alignment::Justify;
+        if (v == "left" || v == "start") return Alignment::Left;
+        return Alignment::Default;
     }
 
     void applyListInfo(const xmllite::Node& p, Paragraph& para) {
@@ -279,23 +293,28 @@ private:
     // inline pictures keep their relative positions.
     void collectRuns(const xmllite::Node& node, Paragraph& para, std::vector<Block>& pending,
                      bool inheritedBold, bool inheritedItalic = false,
-                     const std::string& inheritedColor = std::string()) {
+                     const std::string& inheritedColor = std::string(),
+                     const std::string& inheritedFont = std::string()) {
         for (const auto& c : node.children) {
             if (c.tag == "w:pPr") continue;
             if (c.tag == "w:r") {
                 bool bold = inheritedBold, italic = inheritedItalic;
                 std::string color = inheritedColor;
+                std::string font = inheritedFont;
                 const xmllite::Node* rpr = child(c, "w:rPr");
                 if (rpr) {
                     if (const xmllite::Node* b = child(*rpr, "w:b")) bold = onFlag(*b);
                     if (const xmllite::Node* i = child(*rpr, "w:i")) italic = onFlag(*i);
                     if (const xmllite::Node* col = child(*rpr, "w:color"))
                         if (const std::string* v = col->attr("w:val")) color = normaliseColor(*v);
+                    if (const xmllite::Node* rf = child(*rpr, "w:rFonts"))
+                        if (const std::string* v = rf->attr("w:ascii")) font = *v;
                 }
-                appendRunContent(c, para, pending, bold, italic, color);
+                appendRunContent(c, para, pending, bold, italic, color, font);
             } else if (c.tag == "w:hyperlink" || c.tag == "w:smartTag" || c.tag == "w:ins" ||
                        c.tag == "w:sdt" || c.tag == "w:sdtContent" || c.tag == "w:bdo") {
-                collectRuns(c, para, pending, inheritedBold, inheritedItalic, inheritedColor);
+                collectRuns(c, para, pending, inheritedBold, inheritedItalic, inheritedColor,
+                           inheritedFont);
             } else if (c.tag == "w:del") {
                 // Tracked deletions are not part of the document's text.
                 continue;
@@ -304,20 +323,21 @@ private:
     }
 
     void appendRunContent(const xmllite::Node& run, Paragraph& para, std::vector<Block>& pending,
-                          bool bold, bool italic, const std::string& color) {
+                          bool bold, bool italic, const std::string& color,
+                          const std::string& font) {
         for (const auto& c : run.children) {
             if (c.tag == "w:t") {
-                addText(para, c.allText(), bold, italic, color);
+                addText(para, c.allText(), bold, italic, color, font);
             } else if (c.tag == "w:tab") {
-                addText(para, "\t", bold, italic, color);
+                addText(para, "\t", bold, italic, color, font);
             } else if (c.tag == "w:br" || c.tag == "w:cr") {
-                addText(para, " ", bold, italic, color);
+                addText(para, " ", bold, italic, color, font);
             } else if (c.tag == "w:noBreakHyphen") {
-                addText(para, "-", bold, italic, color);
+                addText(para, "-", bold, italic, color, font);
             } else if (c.tag == "w:sym") {
                 // A symbol-font character has no Unicode meaning we can
                 // recover reliably; a space keeps the surrounding words apart.
-                addText(para, " ", bold, italic, color);
+                addText(para, " ", bold, italic, color, font);
             } else if (c.tag == "w:drawing" || c.tag == "w:pict" || c.tag == "w:object") {
                 readDrawing(c, pending);
             }
@@ -325,9 +345,9 @@ private:
     }
 
     void addText(Paragraph& para, const std::string& text, bool bold, bool italic,
-                 const std::string& color) {
+                 const std::string& color, const std::string& font) {
         if (text.empty()) return;
-        Run candidate{text, bold, italic, color};
+        Run candidate{text, bold, italic, font, color};
         if (!para.runs.empty() && para.runs.back().sameStyle(candidate)) {
             para.runs.back().text += text;
         } else {
@@ -402,9 +422,19 @@ private:
             }
         }
 
+        // Column position of each cell, tracked alongside table.rows so a
+        // later pass can collapse w:vMerge continuation cells into the
+        // "restart" cell's rowSpan — Word represents a vertically merged
+        // cell as one real cell plus a same-column placeholder in every row
+        // it covers, and doc_model.h wants that folded into a single
+        // TableCell instead.
+        std::vector<std::vector<int>> colOf;
+
         for (const auto& tr : tbl.children) {
             if (tr.tag != "w:tr") continue;
             TableRow row;
+            std::vector<int> rowColOf;
+            int nextCol = 0;
             if (const xmllite::Node* trPr = child(tr, "w:trPr"))
                 row.isHeader = child(*trPr, "w:tblHeader") != nullptr;
 
@@ -414,6 +444,25 @@ private:
                 if (const xmllite::Node* tcPr = child(tc, "w:tcPr")) {
                     if (const xmllite::Node* span = child(*tcPr, "w:gridSpan"))
                         cell.gridSpan = std::max(1, intAttr(*span, "w:val", 1));
+                    if (const xmllite::Node* shd = child(*tcPr, "w:shd"))
+                        if (const std::string* fill = shd->attr("w:fill"))
+                            cell.shading = normaliseColor(*fill);
+                    if (const xmllite::Node* borders = child(*tcPr, "w:tcBorders")) {
+                        auto present = [&](const char* tag) {
+                            const xmllite::Node* edge = child(*borders, tag);
+                            if (!edge) return true; // unspecified defaults to the table border
+                            const std::string* v = edge->attr("w:val");
+                            return !(v && *v == "nil");
+                        };
+                        cell.borders.top = present("w:top");
+                        cell.borders.bottom = present("w:bottom");
+                        cell.borders.left = present("w:left");
+                        cell.borders.right = present("w:right");
+                    }
+                    if (const xmllite::Node* vMerge = child(*tcPr, "w:vMerge")) {
+                        const std::string* v = vMerge->attr("w:val");
+                        cell.verticallyMerged = !(v && *v == "restart");
+                    }
                 }
                 for (const auto& inner : tc.children) {
                     if (inner.tag == "w:p") {
@@ -426,9 +475,40 @@ private:
                         if (!b.table->rows.empty()) cell.blocks.push_back(std::move(b));
                     }
                 }
+                rowColOf.push_back(nextCol);
+                nextCol += cell.gridSpan;
                 row.cells.push_back(std::move(cell));
             }
-            if (!row.cells.empty()) table.rows.push_back(std::move(row));
+            if (!row.cells.empty()) {
+                table.rows.push_back(std::move(row));
+                colOf.push_back(std::move(rowColOf));
+            }
+        }
+
+        // Fold each vMerge run's row count onto the cell that started it.
+        // The continuation cells themselves stay in place, emptied out —
+        // both writers expect every row to carry a full set of grid
+        // columns, a placeholder included, the same shape a ruled PDF table
+        // produces; removing them here would leave later rows short a
+        // column with nothing to say why.
+        std::map<int, std::pair<size_t, size_t>> openOrigin; // column -> (row, cell)
+        for (size_t r = 0; r < table.rows.size(); ++r) {
+            for (size_t ci = 0; ci < table.rows[r].cells.size(); ++ci) {
+                int col = colOf[r][ci];
+                TableCell& cell = table.rows[r].cells[ci];
+                if (cell.verticallyMerged) {
+                    auto it = openOrigin.find(col);
+                    if (it != openOrigin.end()) {
+                        table.rows[it->second.first].cells[it->second.second].rowSpan++;
+                        cell.blocks.clear();
+                        continue;
+                    }
+                    // No matching restart cell above: treat it as an
+                    // ordinary cell rather than silently dropping it.
+                    cell.verticallyMerged = false;
+                }
+                openOrigin[col] = {r, ci};
+            }
         }
 
         // The grid and the actual cells disagree in plenty of real documents
@@ -451,6 +531,29 @@ private:
 };
 
 } // namespace
+
+// Reads a header/footer part (word/header1.xml, word/footer1.xml, ...):
+// same run/paragraph shape as the body, just under a different root
+// element, so it goes through the same Reader.
+std::vector<Paragraph> readRunningPart(Reader& reader, const Package& pkg,
+                                       const std::string& target) {
+    std::string xml = pkg.part(target);
+    if (xml.empty()) return {};
+    std::vector<xmllite::Node> roots;
+    try {
+        roots = xmllite::parse(xml);
+    } catch (...) {
+        return {};
+    }
+    if (roots.empty()) return {};
+
+    std::vector<Block> blocks;
+    reader.readBody(roots[0], blocks);
+    std::vector<Paragraph> paragraphs;
+    for (auto& b : blocks)
+        if (b.kind == Block::Kind::Paragraph) paragraphs.push_back(std::move(b.paragraph));
+    return paragraphs;
+}
 
 DocModel readDocx(const std::string& path) {
     Package pkg{path};
@@ -482,6 +585,31 @@ DocModel readDocx(const std::string& path) {
     Reader reader(pkg, numbering, rels);
     DocModel doc;
     reader.readBody(*body, doc.blocks);
+
+    // A section can reference a header/footer for its first/even/default
+    // variant; only "default" is worth recovering into a flat model that
+    // has no notion of odd/even pages to begin with.
+    std::vector<const xmllite::Node*> sectPrs;
+    xmllite::findAll(*documentRoot, "w:sectPr", sectPrs);
+    for (const auto* sectPr : sectPrs) {
+        for (const auto& c : sectPr->children) {
+            bool isHeader = c.tag == "w:headerReference";
+            bool isFooter = c.tag == "w:footerReference";
+            if (!isHeader && !isFooter) continue;
+            const std::string* type = c.attr("w:type");
+            if (type && *type != "default") continue;
+            const std::string* rid = c.attr("r:id");
+            if (!rid) continue;
+            auto rel = rels.find(*rid);
+            if (rel == rels.end()) continue;
+            std::string target = rel->second;
+            if (target.rfind("word/", 0) != 0) target = "word/" + target;
+            std::vector<Paragraph> paragraphs = readRunningPart(reader, pkg, target);
+            if (paragraphs.empty()) continue;
+            if (isHeader && doc.header.empty()) doc.header = paragraphs;
+            else if (isFooter && doc.footer.empty()) doc.footer = paragraphs;
+        }
+    }
 
     // Trailing empty paragraphs are an artefact of how Word ends a document,
     // not content; they would otherwise add a blank page at the bottom.

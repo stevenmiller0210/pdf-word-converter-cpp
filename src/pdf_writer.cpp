@@ -175,6 +175,7 @@ struct PlacedRule {
 struct PlacedFill {
     double x = 0, y = 0, w = 0, h = 0;
     double gray = 0.93;
+    std::string color; // "RRGGBB"; when set, overrides `gray`
 };
 
 struct PlacedImage {
@@ -445,7 +446,11 @@ public:
     }
 
     void fill(double x, double y, double w, double h, double gray) {
-        pages_.back().fills.push_back({x, y, w, h, gray});
+        pages_.back().fills.push_back({x, y, w, h, gray, {}});
+    }
+
+    void fillColor(double x, double y, double w, double h, const std::string& hexColor) {
+        pages_.back().fills.push_back({x, y, w, h, 0.93, hexColor});
     }
 
     void image(size_t idx, double x, double y, double w, double h) {
@@ -491,6 +496,19 @@ private:
         }
     }
 
+    // The width of what was actually laid out, so Center/Right can offset a
+    // line within the column instead of leaving it flush left. Justify is
+    // deliberately not attempted here: layoutParagraph has already merged
+    // spaces into each piece's text, so stretching individual word gaps
+    // would need the layout pass redone with word boundaries preserved. A
+    // justified paragraph renders left-aligned instead, which is the same
+    // simplification the browser tool makes.
+    double lineWidth(const Line& line) {
+        double w = 0;
+        for (const auto& pc : line.pieces) w = std::max(w, pc.dx + builder_.measure(pc.face, pc.size, pc.text));
+        return w;
+    }
+
     void renderParagraph(const Paragraph& p, double x, double width, bool allowBreaks) {
         StyleMetrics m = metricsFor(p.style);
         builder_.setLeading(m.leading);
@@ -525,7 +543,12 @@ private:
                                x + indent - std::min(markerW + 4.0, gutter + 4.0),
                                top - lines[i].ascent);
             }
-            pager_.putLine(lines[i], x + indent, top);
+            double lineOffset = 0;
+            if (p.alignment == Alignment::Center)
+                lineOffset = std::max(0.0, (textWidth - lineWidth(lines[i])) / 2.0);
+            else if (p.alignment == Alignment::Right)
+                lineOffset = std::max(0.0, textWidth - lineWidth(lines[i]));
+            pager_.putLine(lines[i], x + indent + lineOffset, top);
         }
         if (allowBreaks) pager_.advance(m.spaceAfter);
         else pager_.advance(m.spaceAfter * 0.5);
@@ -580,14 +603,22 @@ private:
 
         pager_.advance(4);
 
+        // A cell's own `borders` flags (all true by default — see
+        // doc_model.h) draw the grid instead of a uniform full-grid pass, so
+        // a merged cell's shared edge, which the reader left unset, comes
+        // out with no line down its middle. What this does not do is
+        // distribute an over-tall row-spanning cell's height across the
+        // rows it covers — each row is still sized only from what sits in
+        // it, so a spanning cell taller than one row's own content may
+        // overflow into the next row's box. That is rare enough, and
+        // expensive enough to fix properly, that it is left as a known
+        // limitation rather than reworked here.
         for (const auto& row : table.rows) {
-            std::vector<double> cellHeights;
             double rowH = 0;
             size_t col = 0;
             for (const auto& cell : row.cells) {
                 double cw = spanWidth(colW, col, cell.gridSpan);
-                double h = measureCell(cell, cw, row.isHeader);
-                cellHeights.push_back(h);
+                double h = cell.verticallyMerged ? 0.0 : measureCell(cell, cw, row.isHeader);
                 rowH = std::max(rowH, h);
                 col += std::max(1, cell.gridSpan);
             }
@@ -597,27 +628,23 @@ private:
             // it anyway (and letting it overflow) beats dropping the content.
             double top = pager_.reserve(rowH);
 
-            if (row.isHeader) pager_.fill(x, top - rowH, width, rowH, 0.92);
-
             col = 0;
             double cx = x;
             for (const auto& cell : row.cells) {
                 double cw = spanWidth(colW, col, cell.gridSpan);
-                drawCell(cell, cx, cw, top, rowH, row.isHeader);
+
+                if (!cell.shading.empty()) pager_.fillColor(cx, top - rowH, cw, rowH, cell.shading);
+                else if (row.isHeader) pager_.fill(cx, top - rowH, cw, rowH, 0.92);
+
+                if (!cell.verticallyMerged) drawCell(cell, cx, cw, top, rowH, row.isHeader);
+
+                if (cell.borders.top) pager_.rule(cx, top, cx + cw, top);
+                if (cell.borders.bottom) pager_.rule(cx, top - rowH, cx + cw, top - rowH);
+                if (cell.borders.left) pager_.rule(cx, top, cx, top - rowH);
+                if (cell.borders.right) pager_.rule(cx + cw, top, cx + cw, top - rowH);
+
                 cx += cw;
                 col += std::max(1, cell.gridSpan);
-            }
-
-            // Borders
-            pager_.rule(x, top, x + width, top);
-            pager_.rule(x, top - rowH, x + width, top - rowH);
-            cx = x;
-            pager_.rule(cx, top, cx, top - rowH);
-            col = 0;
-            for (const auto& cell : row.cells) {
-                cx += spanWidth(colW, col, cell.gridSpan);
-                col += std::max(1, cell.gridSpan);
-                pager_.rule(cx, top, cx, top - rowH);
             }
         }
         pager_.advance(8);
@@ -784,6 +811,66 @@ std::string streamObject(const std::string& extraDict, const std::string& payloa
     return out;
 }
 
+// ---------- running headers and footers -------------------------------------
+//
+// Neither a header nor a footer goes through the Pager's content flow: they
+// repeat identically on every page, in the margin band the body text never
+// reaches, so they are laid out once and then stamped onto each already-
+// paginated page directly.
+void addRunningText(Builder& builder, const std::vector<Paragraph>& paragraphs, bool isHeader,
+                    std::vector<PageOut>& pages) {
+    if (paragraphs.empty() || pages.empty()) return;
+
+    constexpr double RUNNING_SIZE = 9.0;
+    constexpr double RUNNING_LEADING = 1.3;
+    builder.setLeading(RUNNING_LEADING);
+
+    struct Placed { Line line; double dx; };
+    std::vector<Placed> lines;
+    double totalHeight = 0;
+    for (const auto& p : paragraphs) {
+        for (auto& ln : builder.layoutParagraph(p, contentWidth(), RUNNING_SIZE, false)) {
+            double w = 0;
+            for (const auto& pc : ln.pieces)
+                w = std::max(w, pc.dx + builder.measure(pc.face, pc.size, pc.text));
+            double dx = 0;
+            if (p.alignment == Alignment::Center) dx = std::max(0.0, (contentWidth() - w) / 2.0);
+            else if (p.alignment == Alignment::Right) dx = std::max(0.0, contentWidth() - w);
+            totalHeight += ln.height;
+            lines.push_back({std::move(ln), dx});
+        }
+    }
+    if (lines.empty()) return;
+
+    // The header sits just above the body's top margin, growing downward
+    // toward it; the footer sits just below the body's bottom margin,
+    // growing downward away from the page edge. Both bands are the same
+    // 56pt MARGIN this file uses for the body everywhere else, so a header
+    // or footer of a couple of lines fits comfortably without touching the
+    // content area.
+    double startY = isHeader ? (PAGE_H - MARGIN + 8.0 + totalHeight)
+                             : (MARGIN - 10.0);
+
+    for (auto& page : pages) {
+        double y = startY;
+        for (const auto& placed : lines) {
+            double baseline = y - placed.line.ascent;
+            for (const auto& pc : placed.line.pieces) {
+                if (pc.text.empty()) continue;
+                PlacedText t;
+                t.x = MARGIN + placed.dx + pc.dx;
+                t.y = baseline;
+                t.size = pc.size;
+                t.face = pc.face;
+                t.text = pc.text;
+                t.color = pc.color;
+                page.texts.push_back(std::move(t));
+            }
+            y -= placed.line.height;
+        }
+    }
+}
+
 } // namespace
 
 void writePdf(const std::string& path, const DocModel& doc) {
@@ -796,6 +883,8 @@ void writePdf(const std::string& path, const DocModel& doc) {
 
     std::vector<PageOut>& pages = renderer.pager().pages();
     if (pages.empty()) pages.emplace_back();
+    addRunningText(builder, doc.header, true, pages);
+    addRunningText(builder, doc.footer, false, pages);
     std::vector<ImageSlot>& images = renderer.images();
 
     // ---- object numbering ----
@@ -924,8 +1013,12 @@ void writePdf(const std::string& path, const DocModel& doc) {
         // tables are final.
         std::ostringstream cs;
         for (const auto& f : pages[i].fills) {
-            cs << num(f.gray) << " g\n"
-               << num(f.x) << " " << num(f.y) << " " << num(f.w) << " " << num(f.h) << " re f\n";
+            double r = 0, g = 0, b = 0;
+            if (!f.color.empty() && parseHexColor(f.color, r, g, b))
+                cs << num(r) << " " << num(g) << " " << num(b) << " rg\n";
+            else
+                cs << num(f.gray) << " g\n";
+            cs << num(f.x) << " " << num(f.y) << " " << num(f.w) << " " << num(f.h) << " re f\n";
         }
         if (!pages[i].fills.empty()) cs << "0 g\n";
         if (!pages[i].rules.empty()) {

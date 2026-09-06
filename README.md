@@ -17,31 +17,49 @@ Az irány automatikusan a kiválasztott fájl kiterjesztéséből dől el:
 | Bekezdésszöveg, tetszőleges Unicode | Beágyazott, részhalmazolt TrueType betűtípus CID-fontként (`Identity-H`) |
 | Title / Heading 1-3 stílusok | Nagyobb, félkövér szedés, arányos térközökkel |
 | Félkövér, dőlt, félkövér-dőlt futamok | Négy külön betűváltozat (Regular/Bold/Italic/BoldItalic) |
+| Bekezdés-igazítás (balra/középre/jobbra) | `w:jc` szerinti eltolás soronként |
+| Szövegszín | `w:color` → PDF kitöltőszín, futamonként visszaállítva |
 | Felsorolt és számozott listák, egymásba ágyazva | A `numbering.xml`-ből olvasva; a szintenkénti jelölő `•` / `◦` / `▪` |
-| Táblázatok | Valódi rácsként, a `w:tblGrid` oszlopszélességeivel, kerettel; a fejlécsor kiemelve |
+| Táblázatok, cellaösszevonással (`gridSpan`/`vMerge`) | Valódi rácsként, a `w:tblGrid` oszlopszélességeivel; minden cella a saját `w:tcBorders`/`w:shd` szerint kap keretet és hátteret |
+| Futó fejléc/lábléc | A `word/header*.xml`/`footer*.xml` bekezdései minden oldal margójára kiírva |
 | Képek (PNG, JPEG) | JPEG változatlanul (`DCTDecode`), PNG kitömörítve és újratömörítve (`FlateDecode`); az átlátszóság `/SMask`-ként |
 | Oldaltörés | Automatikus; egy táblázatsor sosem törik ketté két oldal között |
 
-Amit **nem** visz át: színek, aláhúzás, betűtípus-választás, pontos
-sortörés/oldaltördelés a forrásból, fejléc/lábléc, lábjegyzetek, beágyazott
-diagram- és OLE-objektumok, GIF/BMP/TIFF/EMF/WMF képek (ezeket a PDF sem
-tudja natívan, átkódolásuk külön munka lenne — a kép ilyenkor kimarad, a
-dokumentum többi része hibátlanul elkészül).
+Amit **nem** visz át: a `w:rFonts`-ban megnevezett betűtípus (a PDF mindig a
+beágyazott DejaVu-négyest használja — a `docx_reader` beolvassa és a
+`.docx`-modellben tárolja a betűtípus nevét, csak a PDF-be rajzoláskor nem
+alkalmazza), aláhúzás, sorkizárás (a `both`/`justify` igazítás balra
+zártként jelenik meg — a szóközök szétnyújtásához a sortördelést kellene
+szóhatárok mentén újraírni, ami nem éri meg a hasznot), pontos
+sortörés/oldaltördelés a forrásból, lábjegyzetek, beágyazott diagram- és
+OLE-objektumok, GIF/BMP/TIFF/EMF/WMF képek (ezeket a PDF sem tudja
+natívan, átkódolásuk külön munka lenne — a kép ilyenkor kimarad, a
+dokumentum többi része hibátlanul elkészül). Egy soron átnyúló
+(rowspan-nal összevont) cellánál, ha a tartalma magasabb, mint amennyit az
+a sor egymagában igényelne, a tartalom átlóghat a következő sorba — a
+magasság-elosztás több sor között külön munka lenne egy ritkán előforduló
+esetért.
 
 **PDF → Word** (`pdf_reader` → `docx_writer`):
 
-A PDF nem tárol bekezdéseket, címsorokat, listákat vagy táblázatokat — csak
-glyphokat koordinátákkal. Amit viszont tárol, azt a `pdftohtml -xml`
-(poppler) mind kiadja, és ebből épül újra a dokumentum:
+A PDF nem tárol bekezdéseket, címsorokat vagy táblázatokat — csak
+glyphokat koordinátákkal, és vonalakat/kitöltéseket a rajzolt grafikának.
+Amit ezekből ki lehet olvasni, azt a `pdftohtml -xml` (a szöveghez) és a
+`pdftocairo -svg` (a vektorgrafikához, lásd lent) mind kiadja, és ebből
+épül újra a dokumentum:
 
 | Megmarad | Honnan |
 | --- | --- |
-| Bekezdések | Az egy blokkon belüli sorokat összefűzi, és ott kezd újat, ahol a betűméret változik, az előző sor jóval a hasáb széle előtt ér véget, a sor beljebb kezdődik, vagy szokatlanul nagy a függőleges rés |
+| Bekezdések | Az egy blokkon belüli sorokat összefűzi, és ott kezd újat, ahol a betűméret változik, az előző sor jóval a hasáb széle előtt ér véget, a sor beljebb kezdődik, szokatlanul nagy a függőleges rés, vagy az előző sor láthatóan margótól messze kezdődött (jobbra/középre zárt) miközben az új sor a margónál kezdődik |
 | Címsorok (Title / Heading 1-3) | A dokumentum leggyakoribb betűméretéhez (a kenyérszöveg mérete) viszonyítva, csak rövid blokkoknál |
+| Bekezdés-igazítás (balra/középre/jobbra) | A sorok margóhoz viszonyított helyzetéből — sorkizárt (justify) szöveg balra zártként jön vissza, a PDF ugyanis nem különbözteti meg a kettőt egyetlen sor alapján |
 | Felsorolt és számozott listák | A sor elejéről lekerülő `•` / `-` / `1.` / `1)` jelölőből |
 | Félkövér és dőlt szedés | A poppler `<b>` / `<i>` jelöléséből, ami a beágyazott betűtípus nevéből jön |
 | Szövegszín | A `<fontspec color="…">` értékéből |
-| Táblázatok | Egymást követő sorokból, amelyek ugyanarra a néhány oszlophatárra esnek; a csupa félkövér első sor fejlécsor lesz |
+| Betűtípus neve | A `<fontspec family="…">`-ből, a részhalmaz-előtag (`BAAAAA+`) és a stílus-utótag (`-Bold`, `MT`, `PS`) levágva, néhány ismert fájlnév (`DejaVuSans` → `DejaVu Sans`) feloldva |
+| Táblázatok, **valódi rajzolt vonalakból** | `pdftocairo -svg`-vel kinyert vízszintes/függőleges vonalakból épített rács; egy hiányzó vonal két szomszédos cella között = összevont cella (`gridSpan`/`vMerge`), a cellák saját `w:tcBorders`/`w:shd`-t kapnak a valódi keret/háttérszín szerint |
+| Táblázatok vonal nélkül | Ha a PDF nem rajzol vonalat, tartalék: egymást követő sorokból, amelyek ugyanarra a néhány oszlophatárra esnek; a csupa félkövér első sor fejlécsor lesz |
+| Futó fejléc/lábléc | A lap tetején/alján (a magasság felső/alsó 10%-ában) ismétlődő, számjegyeire maszkolva azonos sorokból; sosem üresíti ki egyetlen oldal teljes tartalmát sem (lásd lent) |
 | Képek | A poppler kicsomagolja őket a helyükkel és méretükkel együtt; egy JPEG JPEG marad, nincs újrakódolás |
 
 A **sorvégi kötőjelet megtartja**: a Word és a LibreOffice alapból nem
@@ -51,13 +69,26 @@ kötőjele, ami véletlenül a sor végére esett) — az eldobása
 elválasztott PDF-ben (LaTeX, újság) marad egy látható kötőjel a szó
 közepén.
 
-Amit **nem** lehet visszanyerni: cellaösszevonás és -keret, háttérszín,
-fejléc/lábléc, a pontos elrendezés és betűtípus. A táblázatfelismerés
+**A fejléc/lábléc-felismerésnek van egy biztonsági szelepe**: mivel egy
+ismétlődő sor csak a lap margója közelében és csak több oldalon
+azonos-a-számjegyek-levágása-után formában számít jelöltnek, egy nagyon
+rövid (egy-két bekezdéses) dokumentumon előfordulhatna, hogy a bekezdés
+maga esik ebbe a mintába. Ezért mielőtt bármit fejléc/láblécnek
+minősítene, a felismerő megnézi: ha az adott oldalon az ÖSSZES jelölt sor
+együttes eltávolítása a teljes tartalmat kitörölné arról az oldalról, az
+egész zóna jelöltjeit elveti — inkább egy dokumentum, aminek nincs
+felismert fejléce, mint egy oldal, aminek nincs tartalma. Ez nem
+elméleti eset: az első verzió pontosan ebbe futott bele egy háromoldalas
+teszt-dokumentumon, ahol az egyetlen bekezdés minden oldalon a margó
+közelében kezdődött.
+
+Amit **nem** lehet visszanyerni: sorkizárás (a fentiek szerint balra
+zártként jön vissza), a pontos elrendezés (a PDF-nek nincs bekezdés- vagy
+oldalmodellje, amiből ez származna — egy Word-dokumentum újratördelhető,
+egy fix elrendezésű PDF nem, ez a formátumok közti alapvető, nem javítható
+különbség). A táblázatfelismerés — akár vonalas, akár szöveg-igazításos —
 szándékosan óvatos: egy kihagyott táblázat sima bekezdésekké esik szét, egy
-tévesen felismert viszont tönkretesz egy egyébként jó szövegrészt — ezért
-csak akkor ismer fel táblázatot, ha a cellák között tényleg van vízszintes
-rés (nem elég, hogy a sor több darabból áll: egy félkövér szó a mondat
-közepén is új darabot kezd).
+tévesen felismert viszont tönkretesz egy egyébként jó szövegrészt.
 
 Egy apróság: a PDF a színt lebegőpontosan tárolja, így egy komponens
 1/255-tel eltérhet oda-vissza átalakítás után. Ez nem hiba, csak
@@ -140,8 +171,9 @@ src/
   docx_reader.{h,cpp}   .docx beolvasása (unzip + xml_lite): futamok, listák,
                         táblázatok, beágyazott képek
   docx_writer.{h,cpp}   .docx írása (kézzel épített OOXML csomag + zip)
-  pdf_reader.{h,cpp}    PDF -> dokumentumszerkezet (pdftohtml -xml), tablazat-
-                        felismeres, OCR-tartalek (pdftoppm + tesseract)
+  pdf_reader.{h,cpp}    PDF -> dokumentumszerkezet (pdftohtml -xml szoveghez,
+                        pdftocairo -svg vonalas tablazat/hatterszin/fejlec-
+                        lablec-felismereshez), OCR-tartalek (pdftoppm + tesseract)
   pdf_writer.{h,cpp}    PDF írása: tördelés, oldaltörés, táblázatrajzolás,
                         képelhelyezés, kézzel írt PDF szintaxis
   convert.{h,cpp}       a modulokat összekötő magas szintű API
@@ -152,6 +184,9 @@ tests/
                         nem tud elérni (futamok, listák, táblázatok)
   run_tests.sh          végponttól végpontig futó ellenőrzések (make test)
   sample_hu.docx        magyar ékezetes mintadokumentum
+  fixtures/
+    make_header_footer_docx.py  kézzel épített 3 oldalas .docx futó
+                        fejléccel/lábléccel — run_tests.sh hívja
 ```
 
 ## Fordítás
@@ -165,7 +200,7 @@ sudo apt install -y build-essential libgtk-3-dev zlib1g-dev poppler-utils \
 sudo apt install -y tesseract-ocr tesseract-ocr-hun tesseract-ocr-eng
 ```
 
-A `poppler-utils` adja a `pdftohtml`-t és a `pdftoppm`-et; a `fonts-dejavu` a
+A `poppler-utils` adja a `pdftohtml`-t, a `pdftocairo`-t és a `pdftoppm`-et; a `fonts-dejavu` a
 beágyazandó betűkészletet (ha hiányzik, a program `fc-match`-csel keres helyette másik
 TrueType fontot, és csak akkor hibázik, ha egyet sem talál).
 

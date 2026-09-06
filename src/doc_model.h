@@ -28,6 +28,10 @@ struct Run {
     std::string text; // UTF-8
     bool bold = false;
     bool italic = false;
+    // Family name only ("Liberation Serif"), never the file name a PDF
+    // carries ("BAAAAA+LiberationSerif-Bold"); empty means "whatever the
+    // reader defaults to".
+    std::string font;
     // "RRGGBB", uppercase hex, empty for the default (black). Kept as a
     // string because that is what OOXML's w:color wants and what a PDF
     // reader hands back; parsing it into components here would just mean
@@ -35,8 +39,19 @@ struct Run {
     std::string color;
 
     bool sameStyle(const Run& other) const {
-        return bold == other.bold && italic == other.italic && color == other.color;
+        return bold == other.bold && italic == other.italic && color == other.color &&
+               font == other.font;
     }
+};
+
+// Horizontal alignment. A PDF does not record it, but centred and
+// right-aligned text is unmistakable from where the lines sit.
+enum class Alignment {
+    Default,
+    Left,
+    Center,
+    Right,
+    Justify,
 };
 
 enum class ListKind {
@@ -55,6 +70,7 @@ struct Paragraph {
     std::vector<Run> runs;
     ParagraphStyle style = ParagraphStyle::Normal;
     ListInfo list;
+    Alignment alignment = Alignment::Default;
 
     std::string text() const {
         std::string out;
@@ -92,9 +108,22 @@ struct Block {
     std::shared_ptr<Image> image; // Table is still only forward-declared here
 };
 
+// Which of a cell's four edges were actually drawn. A PDF has no table
+// object, but it does have the lines — and a missing line between two
+// neighbours is exactly what a merged cell is.
+struct CellBorders {
+    bool top = true, bottom = true, left = true, right = true;
+};
+
 struct TableCell {
     std::vector<Block> blocks; // cells hold blocks, so nested content works
     int gridSpan = 1;
+    int rowSpan = 1;
+    CellBorders borders;
+    std::string shading; // "RRGGBB" background, empty for none
+    // Set on the placeholder cells a row-spanning cell covers; they carry no
+    // content and exist only so each row still has the full set of columns.
+    bool verticallyMerged = false;
 };
 
 struct TableRow {
@@ -109,6 +138,10 @@ struct Table {
 
 struct DocModel {
     std::vector<Block> blocks;
+    // Running header/footer text, recovered from what repeats in the page
+    // margins. Empty for a document that has none.
+    std::vector<Paragraph> header;
+    std::vector<Paragraph> footer;
 
     void addBlock(Block b) { blocks.push_back(std::move(b)); }
 
@@ -122,7 +155,7 @@ struct DocModel {
     void addParagraph(const std::string& text, ParagraphStyle style = ParagraphStyle::Normal) {
         Paragraph p;
         p.style = style;
-        if (!text.empty()) p.runs.push_back(Run{text, false, false, {}});
+        if (!text.empty()) p.runs.push_back(Run{text, false, false, {}, {}});
         addParagraph(std::move(p));
     }
 };
