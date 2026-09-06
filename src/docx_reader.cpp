@@ -1,99 +1,477 @@
 #include "docx_reader.h"
 #include "xml_lite.h"
 #include "process_util.h"
-#include <stdexcept>
+#include "image_codec.h"
+
 #include <algorithm>
 #include <cctype>
+#include <map>
+#include <set>
+#include <stdexcept>
+#include <string>
 
 namespace {
 
-// Walks a <w:p> paragraph's children in document order, concatenating run
-// text (<w:t>), and approximating <w:tab/> as a tab character and
-// <w:br/>/<w:cr/> as a space (so words on either side of a manual line
-// break don't get glued together). This intentionally does not attempt to
-// reproduce exact Word line breaks — see doc_model.h.
-void extractRunText(const xmllite::Node& node, std::string& out) {
-    if (node.tag == "w:t") {
-        out += node.allText();
-        return;
-    }
-    if (node.tag == "w:tab") { out += '\t'; return; }
-    if (node.tag == "w:br" || node.tag == "w:cr") { out += ' '; return; }
-    for (const auto& child : node.children) extractRunText(child, out);
+// EMU (English Metric Units) are OOXML's internal length unit: 914400 to the
+// inch, and a PDF point is 1/72 inch.
+constexpr double EMU_PER_POINT = 12700.0;
+
+bool onFlag(const xmllite::Node& n) {
+    // <w:b/> means on; <w:b w:val="0"/> means explicitly off. Word writes
+    // both, and treating the second as "on" makes every un-bolded run inside
+    // a bold style come out bold.
+    const std::string* v = n.attr("w:val");
+    if (!v) return true;
+    return !(*v == "0" || *v == "false" || *v == "off");
 }
 
-std::string paragraphText(const xmllite::Node& p) {
-    std::string text;
-    extractRunText(p, text);
-    return text;
+std::string toLower(std::string s) {
+    for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return s;
+}
+
+bool isBlankText(const std::string& s) {
+    return std::all_of(s.begin(), s.end(), [](unsigned char c) { return std::isspace(c); });
 }
 
 ParagraphStyle styleFromId(const std::string& styleId) {
-    if (styleId == "Title") return ParagraphStyle::Title;
-    if (styleId == "Heading1") return ParagraphStyle::Heading1;
-    if (styleId == "Heading2") return ParagraphStyle::Heading2;
-    if (styleId == "Heading3") return ParagraphStyle::Heading3;
+    std::string id = toLower(styleId);
+    // Word writes "Heading1"; LibreOffice writes "Heading_20_1". Normalising
+    // to lowercase and stripping separators covers both without a lookup
+    // table per producer.
+    std::string norm;
+    for (char c : id)
+        if (std::isalnum(static_cast<unsigned char>(c))) norm += c;
+    if (norm == "title") return ParagraphStyle::Title;
+    if (norm == "subtitle") return ParagraphStyle::Heading2;
+    if (norm == "heading1" || norm == "heading201") return ParagraphStyle::Heading1;
+    if (norm == "heading2" || norm == "heading202") return ParagraphStyle::Heading2;
+    if (norm == "heading3" || norm == "heading203") return ParagraphStyle::Heading3;
     return ParagraphStyle::Normal;
 }
 
-ParagraphStyle paragraphStyle(const xmllite::Node& p) {
-    for (const auto& child : p.children) {
-        if (child.tag != "w:pPr") continue;
-        for (const auto& pprChild : child.children) {
-            if (pprChild.tag == "w:pStyle") {
-                const std::string* val = pprChild.attr("w:val");
-                if (val) return styleFromId(*val);
+const xmllite::Node* child(const xmllite::Node& n, const std::string& tag) {
+    for (const auto& c : n.children)
+        if (c.tag == tag) return &c;
+    return nullptr;
+}
+
+int intAttr(const xmllite::Node& n, const std::string& name, int fallback) {
+    const std::string* v = n.attr(name);
+    if (!v) return fallback;
+    try {
+        return std::stoi(*v);
+    } catch (...) {
+        return fallback;
+    }
+}
+
+// ---------- package access --------------------------------------------------
+
+// One unzip process per part. Slower than opening the archive once, but this
+// tool already shells out to unzip for document.xml and a real zip reader is
+// a lot of code to own for three or four small parts.
+struct Package {
+    std::string path;
+
+    std::string part(const std::string& name) const {
+        CommandResult res = runCommand({"unzip", "-p", path, name});
+        if (res.exitCode != 0) return {};
+        return res.stdoutData;
+    }
+};
+
+// ---------- numbering -------------------------------------------------------
+
+// numId -> level -> is this level numbered (rather than bulleted)?
+struct Numbering {
+    std::map<int, std::map<int, bool>> numbered;
+
+    bool isNumbered(int numId, int level) const {
+        auto n = numbered.find(numId);
+        if (n == numbered.end()) return false;
+        auto l = n->second.find(level);
+        if (l == n->second.end()) return false;
+        return l->second;
+    }
+    bool known(int numId) const { return numbering_known.count(numId) > 0; }
+    std::set<int> numbering_known;
+};
+
+Numbering readNumbering(const Package& pkg) {
+    Numbering out;
+    std::string xml = pkg.part("word/numbering.xml");
+    if (xml.empty()) return out;
+
+    std::vector<xmllite::Node> roots;
+    try {
+        roots = xmllite::parse(xml);
+    } catch (...) {
+        return out; // a list that renders as bullets beats failing the file
+    }
+    if (roots.empty()) return out;
+
+    // abstractNumId -> level -> numbered?
+    std::map<int, std::map<int, bool>> abstracts;
+    std::vector<const xmllite::Node*> absNodes;
+    xmllite::findAll(roots[0], "w:abstractNum", absNodes);
+    for (const auto* a : absNodes) {
+        int absId = intAttr(*a, "w:abstractNumId", -1);
+        if (absId < 0) continue;
+        std::vector<const xmllite::Node*> lvls;
+        xmllite::findAll(*a, "w:lvl", lvls);
+        for (const auto* l : lvls) {
+            int ilvl = intAttr(*l, "w:ilvl", 0);
+            const xmllite::Node* fmt = child(*l, "w:numFmt");
+            std::string val = fmt && fmt->attr("w:val") ? *fmt->attr("w:val") : "bullet";
+            abstracts[absId][ilvl] = (val != "bullet" && val != "none");
+        }
+    }
+
+    std::vector<const xmllite::Node*> numNodes;
+    xmllite::findAll(roots[0], "w:num", numNodes);
+    for (const auto* n : numNodes) {
+        int numId = intAttr(*n, "w:numId", -1);
+        if (numId < 0) continue;
+        const xmllite::Node* ref = child(*n, "w:abstractNumId");
+        int absId = ref ? intAttr(*ref, "w:val", -1) : -1;
+        out.numbering_known.insert(numId);
+        auto it = abstracts.find(absId);
+        if (it != abstracts.end()) out.numbered[numId] = it->second;
+    }
+    return out;
+}
+
+// ---------- relationships ---------------------------------------------------
+
+std::map<std::string, std::string> readRels(const Package& pkg) {
+    std::map<std::string, std::string> out;
+    std::string xml = pkg.part("word/_rels/document.xml.rels");
+    if (xml.empty()) return out;
+    std::vector<xmllite::Node> roots;
+    try {
+        roots = xmllite::parse(xml);
+    } catch (...) {
+        return out;
+    }
+    if (roots.empty()) return out;
+    std::vector<const xmllite::Node*> rels;
+    xmllite::findAll(roots[0], "Relationship", rels);
+    for (const auto* r : rels) {
+        const std::string* id = r->attr("Id");
+        const std::string* target = r->attr("Target");
+        if (id && target) out[*id] = *target;
+    }
+    return out;
+}
+
+std::string mimeForTarget(const std::string& target) {
+    std::string t = toLower(target);
+    auto ends = [&](const char* suffix) {
+        size_t n = std::string(suffix).size();
+        return t.size() >= n && t.compare(t.size() - n, n, suffix) == 0;
+    };
+    if (ends(".png")) return "image/png";
+    if (ends(".jpg") || ends(".jpeg")) return "image/jpeg";
+    if (ends(".gif")) return "image/gif";
+    if (ends(".bmp")) return "image/bmp";
+    if (ends(".tif") || ends(".tiff")) return "image/tiff";
+    if (ends(".emf")) return "image/x-emf";
+    if (ends(".wmf")) return "image/x-wmf";
+    return "application/octet-stream";
+}
+
+// ---------- the reader itself ----------------------------------------------
+
+class Reader {
+public:
+    Reader(const Package& pkg, const Numbering& numbering,
+           const std::map<std::string, std::string>& rels)
+        : pkg_(pkg), numbering_(numbering), rels_(rels) {}
+
+    void readBody(const xmllite::Node& body, std::vector<Block>& out) {
+        for (const auto& node : body.children) {
+            if (node.tag == "w:p") {
+                readParagraph(node, out);
+            } else if (node.tag == "w:tbl") {
+                Block b;
+                b.kind = Block::Kind::Table;
+                b.table = std::make_shared<Table>();
+                readTable(node, *b.table);
+                if (!b.table->rows.empty()) out.push_back(std::move(b));
+            }
+            // w:sectPr, w:bookmarkStart, ... carry no content we can render.
+        }
+    }
+
+private:
+    // A paragraph can produce more than one block: Word puts inline pictures
+    // inside a run, so "text, picture, more text" is one <w:p> that has to
+    // come out as three blocks in the right order.
+    void readParagraph(const xmllite::Node& p, std::vector<Block>& out) {
+        Paragraph para;
+        para.style = paragraphStyle(p);
+        applyListInfo(p, para);
+
+        std::vector<Block> pending;
+        collectRuns(p, para, pending, defaultBold(para.style));
+
+        if (!para.empty()) {
+            Block b;
+            b.kind = Block::Kind::Paragraph;
+            b.paragraph = std::move(para);
+            out.push_back(std::move(b));
+        }
+        for (auto& b : pending) out.push_back(std::move(b));
+    }
+
+    static bool defaultBold(ParagraphStyle s) { return s != ParagraphStyle::Normal; }
+
+    ParagraphStyle paragraphStyle(const xmllite::Node& p) {
+        const xmllite::Node* ppr = child(p, "w:pPr");
+        if (!ppr) return ParagraphStyle::Normal;
+        const xmllite::Node* st = child(*ppr, "w:pStyle");
+        if (st && st->attr("w:val")) return styleFromId(*st->attr("w:val"));
+        return ParagraphStyle::Normal;
+    }
+
+    void applyListInfo(const xmllite::Node& p, Paragraph& para) {
+        const xmllite::Node* ppr = child(p, "w:pPr");
+        if (!ppr) return;
+        const xmllite::Node* numPr = child(*ppr, "w:numPr");
+        if (!numPr) return;
+        const xmllite::Node* ilvlNode = child(*numPr, "w:ilvl");
+        const xmllite::Node* numIdNode = child(*numPr, "w:numId");
+        int level = ilvlNode ? intAttr(*ilvlNode, "w:val", 0) : 0;
+        int numId = numIdNode ? intAttr(*numIdNode, "w:val", 0) : 0;
+        if (numId <= 0) return;
+
+        para.list.level = std::max(0, level);
+        para.list.kind = numbering_.isNumbered(numId, para.list.level) ? ListKind::Numbered
+                                                                       : ListKind::Bullet;
+        if (para.list.kind == ListKind::Numbered) {
+            auto key = std::make_pair(numId, para.list.level);
+            para.list.ordinal = ++counters_[key];
+            // Starting a new item at this level restarts everything nested
+            // under it, which is what Word does and what makes 1.1 / 1.2
+            // come out right after a new 2.
+            for (auto it = counters_.begin(); it != counters_.end();) {
+                if (it->first.first == numId && it->first.second > para.list.level)
+                    it = counters_.erase(it);
+                else
+                    ++it;
             }
         }
     }
-    return ParagraphStyle::Normal;
-}
+
+    // Walks a paragraph's children in document order, so runs, hyperlinks and
+    // inline pictures keep their relative positions.
+    void collectRuns(const xmllite::Node& node, Paragraph& para, std::vector<Block>& pending,
+                     bool inheritedBold, bool inheritedItalic = false) {
+        for (const auto& c : node.children) {
+            if (c.tag == "w:pPr") continue;
+            if (c.tag == "w:r") {
+                bool bold = inheritedBold, italic = inheritedItalic;
+                const xmllite::Node* rpr = child(c, "w:rPr");
+                if (rpr) {
+                    if (const xmllite::Node* b = child(*rpr, "w:b")) bold = onFlag(*b);
+                    if (const xmllite::Node* i = child(*rpr, "w:i")) italic = onFlag(*i);
+                }
+                appendRunContent(c, para, pending, bold, italic);
+            } else if (c.tag == "w:hyperlink" || c.tag == "w:smartTag" || c.tag == "w:ins" ||
+                       c.tag == "w:sdt" || c.tag == "w:sdtContent" || c.tag == "w:bdo") {
+                collectRuns(c, para, pending, inheritedBold, inheritedItalic);
+            } else if (c.tag == "w:del") {
+                // Tracked deletions are not part of the document's text.
+                continue;
+            }
+        }
+    }
+
+    void appendRunContent(const xmllite::Node& run, Paragraph& para, std::vector<Block>& pending,
+                          bool bold, bool italic) {
+        for (const auto& c : run.children) {
+            if (c.tag == "w:t") {
+                addText(para, c.allText(), bold, italic);
+            } else if (c.tag == "w:tab") {
+                addText(para, "\t", bold, italic);
+            } else if (c.tag == "w:br" || c.tag == "w:cr") {
+                addText(para, " ", bold, italic);
+            } else if (c.tag == "w:noBreakHyphen") {
+                addText(para, "-", bold, italic);
+            } else if (c.tag == "w:sym") {
+                // A symbol-font character has no Unicode meaning we can
+                // recover reliably; a space keeps the surrounding words apart.
+                addText(para, " ", bold, italic);
+            } else if (c.tag == "w:drawing" || c.tag == "w:pict" || c.tag == "w:object") {
+                readDrawing(c, pending);
+            }
+        }
+    }
+
+    void addText(Paragraph& para, const std::string& text, bool bold, bool italic) {
+        if (text.empty()) return;
+        if (!para.runs.empty() && para.runs.back().bold == bold &&
+            para.runs.back().italic == italic) {
+            para.runs.back().text += text;
+        } else {
+            para.runs.push_back(Run{text, bold, italic});
+        }
+    }
+
+    void readDrawing(const xmllite::Node& drawing, std::vector<Block>& pending) {
+        std::string relId;
+        std::vector<const xmllite::Node*> blips;
+        xmllite::findAll(drawing, "a:blip", blips);
+        for (const auto* b : blips) {
+            if (const std::string* e = b->attr("r:embed")) { relId = *e; break; }
+            if (const std::string* l = b->attr("r:link")) { relId = *l; break; }
+        }
+        if (relId.empty()) {
+            std::vector<const xmllite::Node*> vml;
+            xmllite::findAll(drawing, "v:imagedata", vml);
+            for (const auto* v : vml)
+                if (const std::string* id = v->attr("r:id")) { relId = *id; break; }
+        }
+        if (relId.empty()) return;
+
+        auto rel = rels_.find(relId);
+        if (rel == rels_.end()) return;
+        std::string target = rel->second;
+        if (target.rfind("../", 0) == 0) target = target.substr(3);
+        if (target.rfind("/", 0) == 0) target = target.substr(1);
+        else if (target.rfind("word/", 0) != 0) target = "word/" + target;
+
+        auto cached = mediaCache_.find(target);
+        std::string bytes;
+        if (cached != mediaCache_.end()) {
+            bytes = cached->second;
+        } else {
+            bytes = pkg_.part(target);
+            mediaCache_[target] = bytes;
+        }
+        if (bytes.empty()) return;
+
+        auto img = std::make_shared<Image>();
+        img->bytes = std::move(bytes);
+        img->mime = mimeForTarget(target);
+        probeImageSize(img->bytes, img->mime, img->pixelWidth, img->pixelHeight);
+
+        // wp:extent is the size Word actually displays the picture at, which
+        // is usually not its pixel size; honouring it keeps a deliberately
+        // shrunk photo shrunk.
+        std::vector<const xmllite::Node*> extents;
+        xmllite::findAll(drawing, "wp:extent", extents);
+        if (extents.empty()) xmllite::findAll(drawing, "a:ext", extents);
+        if (!extents.empty()) {
+            double cx = intAttr(*extents[0], "cx", 0);
+            double cy = intAttr(*extents[0], "cy", 0);
+            if (cx > 0 && cy > 0) {
+                img->displayWidthPt = cx / EMU_PER_POINT;
+                img->displayHeightPt = cy / EMU_PER_POINT;
+            }
+        }
+
+        Block b;
+        b.kind = Block::Kind::Image;
+        b.image = img;
+        pending.push_back(std::move(b));
+    }
+
+    void readTable(const xmllite::Node& tbl, Table& table) {
+        if (const xmllite::Node* grid = child(tbl, "w:tblGrid")) {
+            for (const auto& col : grid->children) {
+                if (col.tag != "w:gridCol") continue;
+                table.columnWidths.push_back(std::max(1, intAttr(col, "w:w", 1)));
+            }
+        }
+
+        for (const auto& tr : tbl.children) {
+            if (tr.tag != "w:tr") continue;
+            TableRow row;
+            if (const xmllite::Node* trPr = child(tr, "w:trPr"))
+                row.isHeader = child(*trPr, "w:tblHeader") != nullptr;
+
+            for (const auto& tc : tr.children) {
+                if (tc.tag != "w:tc") continue;
+                TableCell cell;
+                if (const xmllite::Node* tcPr = child(tc, "w:tcPr")) {
+                    if (const xmllite::Node* span = child(*tcPr, "w:gridSpan"))
+                        cell.gridSpan = std::max(1, intAttr(*span, "w:val", 1));
+                }
+                for (const auto& inner : tc.children) {
+                    if (inner.tag == "w:p") {
+                        readParagraph(inner, cell.blocks);
+                    } else if (inner.tag == "w:tbl") {
+                        Block b;
+                        b.kind = Block::Kind::Table;
+                        b.table = std::make_shared<Table>();
+                        readTable(inner, *b.table);
+                        if (!b.table->rows.empty()) cell.blocks.push_back(std::move(b));
+                    }
+                }
+                row.cells.push_back(std::move(cell));
+            }
+            if (!row.cells.empty()) table.rows.push_back(std::move(row));
+        }
+
+        // The grid and the actual cells disagree in plenty of real documents
+        // (merged cells, stale grids). An unusable grid is worse than none,
+        // because the writer would size columns against the wrong total.
+        size_t widest = 0;
+        for (const auto& r : table.rows) {
+            size_t n = 0;
+            for (const auto& c : r.cells) n += static_cast<size_t>(std::max(1, c.gridSpan));
+            widest = std::max(widest, n);
+        }
+        if (table.columnWidths.size() != widest) table.columnWidths.clear();
+    }
+
+    const Package& pkg_;
+    const Numbering& numbering_;
+    const std::map<std::string, std::string>& rels_;
+    std::map<std::pair<int, int>, int> counters_;
+    std::map<std::string, std::string> mediaCache_;
+};
 
 } // namespace
 
 DocModel readDocx(const std::string& path) {
-    CommandResult res = runCommand({"unzip", "-p", path, "word/document.xml"});
-    if (res.exitCode != 0 || res.stdoutData.empty()) {
+    Package pkg{path};
+    std::string xml = pkg.part("word/document.xml");
+    if (xml.empty()) {
         throw std::runtime_error(
             "Nem sikerult megnyitni a .docx fajlt (nem valos vagy serult DOCX csomag).");
     }
 
     std::vector<xmllite::Node> roots;
     try {
-        roots = xmllite::parse(res.stdoutData);
+        roots = xmllite::parse(xml);
     } catch (const std::exception& e) {
         throw std::runtime_error(std::string("Hibas a dokumentum XML tartalma: ") + e.what());
     }
 
     const xmllite::Node* documentRoot = nullptr;
-    for (const auto& r : roots) {
+    for (const auto& r : roots)
         if (r.tag == "w:document") { documentRoot = &r; break; }
-    }
-    if (!documentRoot) {
+    if (!documentRoot)
         throw std::runtime_error("A document.xml nem tartalmaz varhato <w:document> gyokeret.");
-    }
 
-    std::vector<const xmllite::Node*> paragraphNodes;
-    xmllite::findAll(*documentRoot, "w:p", paragraphNodes);
+    const xmllite::Node* body = child(*documentRoot, "w:body");
+    if (!body) body = documentRoot;
 
+    Numbering numbering = readNumbering(pkg);
+    std::map<std::string, std::string> rels = readRels(pkg);
+
+    Reader reader(pkg, numbering, rels);
     DocModel doc;
-    doc.paragraphs.reserve(paragraphNodes.size());
-    for (const auto* p : paragraphNodes) {
-        std::string text = paragraphText(*p);
-        // Skip paragraphs with no actual text. This matters a lot in
-        // practice: tables aren't understood as tables at all (this reader
-        // has no concept of rows/columns), so every empty table cell shows
-        // up as its own <w:p> with no text — without this filter, a table
-        // with several empty cells turns into a run of blank output lines
-        // that reads as a broken dead zone rather than an (expected,
-        // documented) lack of table support.
-        bool isBlank = std::all_of(text.begin(), text.end(),
-                                    [](unsigned char c) { return std::isspace(c); });
-        if (isBlank) continue;
-        Paragraph para;
-        para.text = std::move(text);
-        para.style = paragraphStyle(*p);
-        doc.paragraphs.push_back(std::move(para));
-    }
+    reader.readBody(*body, doc.blocks);
+
+    // Trailing empty paragraphs are an artefact of how Word ends a document,
+    // not content; they would otherwise add a blank page at the bottom.
+    while (!doc.blocks.empty() && doc.blocks.back().kind == Block::Kind::Paragraph &&
+           isBlankText(doc.blocks.back().paragraph.text()))
+        doc.blocks.pop_back();
+
     return doc;
 }

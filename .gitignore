@@ -1,3 +1,4 @@
 *.o
 /pdf-word-converter
 /cli-test
+/style-smoke
