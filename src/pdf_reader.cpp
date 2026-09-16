@@ -446,12 +446,37 @@ bool stripListMarker(std::vector<Run>& runs, ListInfo& info) {
     if (runs.empty()) return false;
     std::string& text = runs.front().text;
 
+    // Besides the plain Unicode bullets, Word and LibreOffice draw bullets from
+    // the Symbol / Wingdings fonts, whose glyphs sit in the Private Use Area
+    // (U+F0B7 Symbol's bullet, U+F0A7, U+F076, U+F0D8, U+F0FC) — left in place
+    // they came out as a box. Mirrors PDF_BULLETS in PistApp's index.html.
     static const char* kBullets[] = {"\xE2\x80\xA2", "\xE2\x97\xA6", "\xE2\x96\xAA",
-                                     "\xE2\x96\xAC", "\xE2\x80\x93", "\xC2\xB7", "-", "*"};
+                                     "\xE2\x96\xAC", "\xE2\x80\x93", "\xC2\xB7", "-", "*",
+                                     "\xE2\x97\x8F", "\xE2\x97\x8B", "\xE2\x96\xA0",
+                                     "\xE2\x96\xA1", "\xE2\x9E\xA2",
+                                     "\xEF\x82\xB7", "\xEF\x82\xA7", "\xEF\x81\xB6",
+                                     "\xEF\x83\x98", "\xEF\x83\xBC"};
     auto trimFront = [&]() {
         while (!text.empty() && std::isspace(static_cast<unsigned char>(text.front())))
             text.erase(text.begin());
     };
+
+    // A bullet drawn in its own (symbol) font arrives as a run of its own.
+    if (runs.size() > 1) {
+        std::string lone = text;
+        auto notSpace = [](unsigned char c) { return !std::isspace(c); };
+        lone.erase(lone.begin(), std::find_if(lone.begin(), lone.end(), notSpace));
+        lone.erase(std::find_if(lone.rbegin(), lone.rend(), notSpace).base(), lone.end());
+        for (const char* b : kBullets) {
+            if (lone == b) {
+                runs.erase(runs.begin());
+                std::string& next = runs.front().text;
+                next.erase(next.begin(), std::find_if(next.begin(), next.end(), notSpace));
+                info.kind = ListKind::Bullet;
+                return true;
+            }
+        }
+    }
     for (const char* b : kBullets) {
         size_t n = std::string(b).size();
         if (text.size() > n && text.compare(0, n, b) == 0 &&

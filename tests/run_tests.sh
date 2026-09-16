@@ -248,6 +248,28 @@ else
     skip "soffice nincs telepitve"
 fi
 
+echo "== Szimbolum-betukeszletes felsorolasjel (soffice kell hozza) =="
+# LibreOffice (and Word) draw a bullet from the Symbol font: the PDF carries
+# it as the Private Use Area glyph U+F0B7, in a text fragment of its own. It
+# used to survive as a literal character in an "Open Symbol" run — a box in
+# Word — instead of becoming a real list item.
+if need soffice; then
+    printf '<html><body><ul><li>Elso pont</li><li>Masodik pont</li></ul></body></html>' > "$WORK/bullets.html"
+    if soffice --headless --infilter="HTML (StarWriter)" --convert-to 'docx:MS Word 2007 XML' \
+               --outdir "$WORK" "$WORK/bullets.html" >/dev/null 2>&1 && \
+       soffice --headless --convert-to pdf --outdir "$WORK" "$WORK/bullets.docx" >/dev/null 2>&1 && \
+       "$CLI" "$WORK/bullets.pdf" "$WORK/bullets_back.docx" >/dev/null; then
+        XML="$(unzip -p "$WORK/bullets_back.docx" word/document.xml)"
+        case "$XML" in *$'\xEF\x82\xB7'*) bad "a Symbol-felsorolasjel (U+F0B7) bent maradt a szovegben" ;; *) ok "a Symbol-felsorolasjel nem maradt a szovegben" ;; esac
+        case "$XML" in *'<w:numPr>'*'Elso pont'*) ok "a felsorolas valodi listakent jott vissza" ;; *) bad "a felsorolasbol nem lett lista" ;; esac
+    else
+        bad "a felsorolasos teszt-PDF konverzioja nem sikerult"
+    fi
+else
+    skip "soffice nincs telepitve"
+fi
+echo
+
 echo "== Fejlec es lablec =="
 if need soffice && need python3; then
     if python3 "$ROOT/tests/fixtures/make_header_footer_docx.py" "$WORK/hf.docx" >/dev/null && \
