@@ -52,7 +52,7 @@ Amit ezekből ki lehet olvasni, azt a `pdftohtml -xml` (a szöveghez) és a
 | --- | --- |
 | Bekezdések | Az egy blokkon belüli sorokat összefűzi, és ott kezd újat, ahol a betűméret változik, az előző sor jóval a hasáb széle előtt ér véget, a sor beljebb kezdődik, szokatlanul nagy a függőleges rés, vagy az előző sor láthatóan margótól messze kezdődött (jobbra/középre zárt) miközben az új sor a margónál kezdődik |
 | Címsorok (Title / Heading 1-3) | A dokumentum leggyakoribb betűméretéhez (a kenyérszöveg mérete) viszonyítva, csak rövid blokkoknál |
-| Bekezdés-igazítás (balra/középre/jobbra) | A sorok margóhoz viszonyított helyzetéből — sorkizárt (justify) szöveg balra zártként jön vissza, a PDF ugyanis nem különbözteti meg a kettőt egyetlen sor alapján |
+| Bekezdés-igazítás (balra/középre/jobbra/sorkizárt) | A sorok margóhoz viszonyított helyzetéből. Sorkizártnak az a bekezdés számít, amelynek az utolsó kivételével minden sora ugyanott ér véget — egy egysoros bekezdésnél ez nem dönthető el, az balra zártként jön vissza |
 | Felsorolt és számozott listák | A sor elejéről lekerülő `•` / `-` / `1.` / `1)` jelölőből |
 | Félkövér és dőlt szedés | A poppler `<b>` / `<i>` jelöléséből, ami a beágyazott betűtípus nevéből jön |
 | Szövegszín | A `<fontspec color="…">` értékéből |
@@ -82,8 +82,8 @@ elméleti eset: az első verzió pontosan ebbe futott bele egy háromoldalas
 teszt-dokumentumon, ahol az egyetlen bekezdés minden oldalon a margó
 közelében kezdődött.
 
-Amit **nem** lehet visszanyerni: sorkizárás (a fentiek szerint balra
-zártként jön vissza), a pontos elrendezés (a PDF-nek nincs bekezdés- vagy
+Amit **nem** lehet visszanyerni: az egysoros sorkizárt bekezdés igazítása
+(balra zártként jön vissza), a pontos elrendezés (a PDF-nek nincs bekezdés- vagy
 oldalmodellje, amiből ez származna — egy Word-dokumentum újratördelhető,
 egy fix elrendezésű PDF nem, ez a formátumok közti alapvető, nem javítható
 különbség). A táblázatfelismerés — akár vonalas, akár szöveg-igazításos —

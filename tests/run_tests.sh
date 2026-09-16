@@ -248,6 +248,29 @@ else
     skip "soffice nincs telepitve"
 fi
 
+echo "== Sorkizart bekezdes (soffice kell hozza) =="
+# A justified paragraph is recognised when every line but the last ends at the
+# same x; a one-line paragraph cannot be told apart from left-aligned text.
+if need soffice; then
+    python3 - "$WORK/just.html" <<'PY2'
+import sys
+t = "Ez egy hosszabb, sorkizart bekezdes, amelynek tobb sorra kell tordelodnie, hogy a sorkizaras latszodjon. " * 6
+open(sys.argv[1], "w").write('<html><body><p style="text-align:justify">' + t + '</p><p>Rovid balra zart sor.</p></body></html>')
+PY2
+    if soffice --headless --infilter="HTML (StarWriter)" --convert-to 'docx:MS Word 2007 XML' \
+               --outdir "$WORK" "$WORK/just.html" >/dev/null 2>&1 && \
+       soffice --headless --convert-to pdf --outdir "$WORK" "$WORK/just.docx" >/dev/null 2>&1 && \
+       "$CLI" "$WORK/just.pdf" "$WORK/just_back.docx" >/dev/null; then
+        XML="$(unzip -p "$WORK/just_back.docx" word/document.xml)"
+        case "$XML" in *'w:jc w:val="both"'*) ok "a sorkizaras visszanyerve" ;; *) bad "a sorkizaras elveszett" ;; esac
+    else
+        bad "a sorkizart teszt-PDF konverzioja nem sikerult"
+    fi
+else
+    skip "soffice nincs telepitve"
+fi
+echo
+
 echo "== Szimbolum-betukeszletes felsorolasjel (soffice kell hozza) =="
 # LibreOffice (and Word) draw a bullet from the Symbol font: the PDF carries
 # it as the Private Use Area glyph U+F0B7, in a text fragment of its own. It
